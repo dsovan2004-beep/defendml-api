@@ -1,6 +1,7 @@
 name = "defendml-api"
 main = "worker.js"
 compatibility_date = "2024-01-01"
+workers_dev = true
 
 # KV Namespaces
 [[kv_namespaces]]
@@ -15,11 +16,25 @@ id = "a3c27a772f0746e183be83a924a4d94b"
 binding = "AUDIT_LOG"
 id = "e30011d67c0a47c395da47751419cd58"
 
-# Environment Variables (set these in Cloudflare Dashboard)
+# Default Variables (can also be set via Cloudflare dashboard)
+[vars]
+CORS_ORIGIN = "https://defendml.com,https://app.defendml.com,https://defendml-app.pages.dev"
+MOCK_MODE = "false"
+STRICT_MODE = "false"
+
+# Uncomment if you deploy directly from Wrangler CLI and want to inject secrets inline:
 # SUPABASE_URL = "https://your-project.supabase.co"
 # SUPABASE_SERVICE_ROLE = "your-service-role-key"
 # JWT_SECRET = "your-jwt-secret"
 # ANTHROPIC_API_KEY = "sk-ant-..."
-# CORS_ORIGIN = "https://defendml.com,https://app.defendml.com"
-# MOCK_MODE = "false"
-# STRICT_MODE = "false"
+# ANTHROPIC_MODEL = "claude-3-5-sonnet-20240620"
+
+# Deployment Config
+[build]
+command = ""
+upload.format = "modules"
+
+# Optional Route Binding (if using custom domain)
+# routes = [
+#   { pattern = "api.defendml.com/*", zone_name = "defendml.com" }
+# ]
