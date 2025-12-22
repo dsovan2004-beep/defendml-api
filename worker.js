@@ -74,7 +74,13 @@ export default {
     }
 
     async function signHMAC(dataU8) {
-      const key = await crypto.subtle.importKey("raw", te.encode(JWT_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const key = await crypto.subtle.importKey(
+        "raw",
+        te.encode(JWT_SECRET),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
       const sig = await crypto.subtle.sign("HMAC", key, dataU8);
       return new Uint8Array(sig);
     }
@@ -96,7 +102,13 @@ export default {
         if (parts.length !== 3) return null;
         const [h, p, s] = parts;
         const dataU8 = te.encode(`${h}.${p}`);
-        const key = await crypto.subtle.importKey("raw", te.encode(JWT_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+        const key = await crypto.subtle.importKey(
+          "raw",
+          te.encode(JWT_SECRET),
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["verify"]
+        );
         const sigU8 = b64uToU8(s);
         const ok = await crypto.subtle.verify("HMAC", key, sigU8, dataU8);
         if (!ok) return null;
@@ -185,14 +197,17 @@ export default {
 
     const source_ip = request.headers.get("CF-Connecting-IP") || "";
     const user_agent = request.headers.get("User-Agent") || "";
-    const isRisky = (text) => /ignore safety|print system secrets|exfiltrat|bypass|steal|token|password|key/i.test(text || "");
+    const isRisky = (text) =>
+      /ignore safety|print system secrets|exfiltrat|bypass|steal|token|password|key/i.test(text || "");
 
     const hasSB = !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE);
-    const sbHeaders = hasSB ? {
-      "content-type": "application/json",
-      apikey: env.SUPABASE_SERVICE_ROLE,
-      authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE}`,
-    } : null;
+    const sbHeaders = hasSB
+      ? {
+          "content-type": "application/json",
+          apikey: env.SUPABASE_SERVICE_ROLE,
+          authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE}`,
+        }
+      : null;
 
     async function sbPost(path, body, prefer = "return=minimal") {
       if (!hasSB) throw new Error("supabase_not_configured");
@@ -214,7 +229,10 @@ export default {
       return resp;
     }
 
-    const parsedIngestKeys = String(env.INGEST_API_KEY || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const parsedIngestKeys = String(env.INGEST_API_KEY || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     function requireIngestKey(req) {
       const got = req.headers.get("x-api-key") || "";
@@ -226,9 +244,16 @@ export default {
     if (!rl.ok) {
       const res = withCORS(json({ success: false, error: "rate_limited", retry_after: rl.retryAfter }, 429), request);
       res.headers.set("Retry-After", String(rl.retryAfter));
-      ctx.waitUntil(logEvent(env.AUDIT_LOG, {
-        route: url.pathname, method: request.method, ip: _ip, action: "BLOCKED", status: 429, latencyMs: Date.now() - _start,
-      }));
+      ctx.waitUntil(
+        logEvent(env.AUDIT_LOG, {
+          route: url.pathname,
+          method: request.method,
+          ip: _ip,
+          action: "BLOCKED",
+          status: 429,
+          latencyMs: Date.now() - _start,
+        })
+      );
       return res;
     }
 
@@ -247,21 +272,13 @@ export default {
 
     const pathIs = (...pats) => pats.includes(url.pathname);
 
-// ========= PART 2 CONTINUES WITH ALL ROUTES =========
-  // ========= CONTINUES FROM PART 1 =========
-
-    // All your existing routes from the original file...
-    // (I'm showing the structure - keep all your existing routes)
-
-    // [Keep all existing routes: /ingest, /metrics, /auth/register, /auth/login, /auth/me, etc.]
-
     // ========= NEW: RED TEAM EXECUTION =========
     if (url.pathname === "/api/red-team/execute" && request.method === "POST") {
       try {
         const startTime = Date.now();
         const body = await request.json().catch(() => ({}));
         const target = String(body?.target || "").trim();
-        
+
         if (!target) {
           return withCORS(json({ success: false, error: "Missing 'target' URL" }, 400), request);
         }
@@ -270,16 +287,17 @@ export default {
           return withCORS(json({ success: false, error: "supabase_not_configured" }, 500), request);
         }
 
-        const timestamp = new Date().toISOString().slice(0,19).replace(/[-:T]/g, '');
-        const report_id = `RPT-${timestamp.slice(0,8)}-${timestamp.slice(8)}-${Math.random().toString(36).slice(2, 6)}`;
-        
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+        const report_id = `RPT-${timestamp.slice(0, 8)}-${timestamp.slice(8)}-${Math.random()
+          .toString(36)
+          .slice(2, 6)}`;
+
         console.log(`[Red Team] Starting scan ${report_id} against ${target}`);
 
-        const promptsResp = await fetch(
-          `${env.SUPABASE_URL}/rest/v1/red_team_tests?status=eq.active&select=*`,
-          { headers: sbHeaders }
-        );
-        
+        const promptsResp = await fetch(`${env.SUPABASE_URL}/rest/v1/red_team_tests?status=eq.active&select=*`, {
+          headers: sbHeaders,
+        });
+
         if (!promptsResp.ok) {
           return withCORS(json({ success: false, error: "Failed to fetch prompts" }, 502), request);
         }
@@ -295,14 +313,14 @@ export default {
 
         for (const prompt of prompts) {
           const testStart = Date.now();
-          
+
           try {
             const testResp = await fetch(target, {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ 
+              body: JSON.stringify({
                 text: prompt.prompt_text,
-                test_id: prompt.test_id 
+                test_id: prompt.test_id,
               }),
             });
 
@@ -328,87 +346,135 @@ export default {
 
             results.push({
               test_id: prompt.test_id,
-              prompt: prompt.prompt_text,
+              prompt_text: prompt.prompt_text,
               category: prompt.category,
+              subcategory: prompt.subcategory || null,
               decision,
               layer_stopped,
               latency_ms: testLatency,
+              status_code: testResp.status,
             });
-
           } catch (err) {
             console.error(`[Red Team] Error testing ${prompt.test_id}:`, err);
           }
 
-          await new Promise(resolve => setTimeout(resolve, 50));
+          await new Promise((resolve) => setTimeout(resolve, 50));
         }
 
         const totalLatency = Date.now() - startTime;
-        const successRate = ((blockedCount + flaggedCount) / results.length * 100).toFixed(1);
+        const successRate = ((blockedCount + flaggedCount) / Math.max(1, results.length) * 100).toFixed(1);
 
-        try {
-          await fetch(`${env.SUPABASE_URL}/rest/v1/red_team_reports`, {
-            method: "POST",
-            headers: { ...sbHeaders, prefer: "return=minimal" },
-            body: JSON.stringify({
-              report_id,
-              target,
-              total_prompts: results.length,
-              blocked_count: blockedCount,
-              flagged_count: flaggedCount,
-              allowed_count: allowedCount,
-              success_rate: parseFloat(successRate),
-              layer_breakdown: layerBreakdown,
-              started_at: new Date(startTime).toISOString(),
-              completed_at: new Date().toISOString(),
-              total_latency_ms: totalLatency,
-            }),
-          });
-        } catch (err) {
-          console.log("[Red Team] Could not store report:", err);
+        // ========= Phase 2: store report + get report_uuid =========
+        const reportInsertResp = await fetch(`${env.SUPABASE_URL}/rest/v1/red_team_reports`, {
+          method: "POST",
+          headers: { ...sbHeaders, prefer: "return=representation" },
+          body: JSON.stringify({
+            report_id,
+            target,
+            total_prompts: results.length,
+            blocked_count: blockedCount,
+            flagged_count: flaggedCount,
+            allowed_count: allowedCount,
+            success_rate: parseFloat(successRate),
+            layer_breakdown: layerBreakdown,
+            started_at: new Date(startTime).toISOString(),
+            completed_at: new Date().toISOString(),
+            total_latency_ms: totalLatency,
+          }),
+        });
+
+        if (!reportInsertResp.ok) {
+          const txt = await reportInsertResp.text().catch(() => "");
+          throw new Error(`failed_to_insert_red_team_report:${txt}`);
         }
 
-        const res = withCORS(json({
-          success: true,
-          report_id,
-          summary: {
-            total: results.length,
-            blocked: blockedCount,
-            flagged: flaggedCount,
-            allowed: allowedCount,
-            success_rate: `${successRate}%`,
-            latency_ms: totalLatency,
-            layer_breakdown: layerBreakdown,
-          },
-          results_preview: results.slice(0, 10),
-        }), request);
+        const inserted = await reportInsertResp.json();
+        const report_uuid = inserted?.[0]?.id;
 
-        ctx.waitUntil(logEvent(env.AUDIT_LOG, {
-          route: url.pathname,
-          method: request.method,
-          ip: _ip,
-          action: "ALLOWED",
-          status: 200,
-          latencyMs: totalLatency,
+        if (!report_uuid) {
+          throw new Error("missing_report_uuid_from_insert");
+        }
+
+        // ========= Phase 2: upsert all results =========
+        // Table expected: public.red_team_results
+        // Unique: (report_uuid, test_id)
+        const rows = results.map((r) => ({
+          report_uuid,
+          test_id: r.test_id,
+          category: r.category || null,
+          subcategory: r.subcategory || null,
+          prompt_text: r.prompt_text || null,
+          decision: r.decision, // ALLOW/BLOCK/FLAG
+          layer_stopped: r.layer_stopped || null,
+          latency_ms: r.latency_ms ?? null,
+          status_code: r.status_code ?? null,
         }));
 
-        return res;
+        if (rows.length > 0) {
+          const upsertResp = await fetch(
+            `${env.SUPABASE_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`,
+            {
+              method: "POST",
+              headers: { ...sbHeaders, prefer: "resolution=merge-duplicates,return=minimal" },
+              body: JSON.stringify(rows),
+            }
+          );
 
+          if (!upsertResp.ok) {
+            const txt = await upsertResp.text().catch(() => "");
+            throw new Error(`failed_to_upsert_red_team_results:${txt}`);
+          }
+        }
+
+        const res = withCORS(
+          json({
+            success: true,
+            report_id,
+            report_uuid,
+            summary: {
+              total: results.length,
+              blocked: blockedCount,
+              flagged: flaggedCount,
+              allowed: allowedCount,
+              success_rate: `${successRate}%`,
+              latency_ms: totalLatency,
+              layer_breakdown: layerBreakdown,
+            },
+            results_preview: results.slice(0, 10),
+          }),
+          request
+        );
+
+        ctx.waitUntil(
+          logEvent(env.AUDIT_LOG, {
+            route: url.pathname,
+            method: request.method,
+            ip: _ip,
+            action: "ALLOWED",
+            status: 200,
+            latencyMs: totalLatency,
+          })
+        );
+
+        return res;
       } catch (err) {
         console.error("[Red Team] Failed:", err);
         return withCORS(json({ success: false, error: String(err) }, 500), request);
       }
     }
 
-    // ========= 404 fallback (keep your existing one) =========
+    // ========= 404 fallback =========
     const nf = withCORS(json({ success: false, error: "Not found" }, 404), request);
-    ctx.waitUntil(logEvent(env.AUDIT_LOG, {
-      route: url.pathname,
-      method: request.method,
-      ip: _ip,
-      action: "ALLOWED",
-      status: 404,
-      latencyMs: Date.now() - _start,
-    }));
+    ctx.waitUntil(
+      logEvent(env.AUDIT_LOG, {
+        route: url.pathname,
+        method: request.method,
+        ip: _ip,
+        action: "ALLOWED",
+        status: 404,
+        latencyMs: Date.now() - _start,
+      })
+    );
     return nf;
   },
 };
