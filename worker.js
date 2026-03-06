@@ -594,8 +594,6 @@ export default {
             total_tests: tests.length,
             blocked_count: 0,
             allowed_count: 0,
-            flagged_count: 0,
-            error_count: 0,
           }),
         });
         const reportRaw = await reportInsertRes.text().catch(() => "");
@@ -733,8 +731,6 @@ export default {
               total_tests: results.length,
               blocked_count: blocked,
               allowed_count: allowed,
-              flagged_count: flagged,
-              error_count: errors,
             }),
           }
         );
