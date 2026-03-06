@@ -14,19 +14,23 @@ id = "a3c27a772f0746e183be83a924a4d94b"
 binding = "AUDIT_LOG"
 id = "e30011d67c0a47c395da47751419cd58"
 
-# Default Variables (set via Cloudflare dashboard for secrets)
+# Default Variables
 [vars]
-CORS_ORIGIN = "https://defendml.com,https://app.defendml.com,https://defendml-app.pages.dev"
+CORS_ORIGIN = "https://defendml.com,https://www.defendml.com,https://app.defendml.com,https://defendml-app.pages.dev,https://console.betaml.ai,https://betaml.ai,https://freeai.defendml.com,https://beta.defendml.com"
 MOCK_MODE = "false"
 STRICT_MODE = "false"
+SUPABASE_URL = "https://rhwvzhksjbsdymvvzxln.supabase.co"
+ANTHROPIC_MODEL = "claude-3-5-sonnet-20241022"
+FF_ASL3_STATUS = "true"
+FF_INCIDENT_CENTER = "true"
 
-# Secrets — set these in the Cloudflare Workers dashboard (not here):
-# SUPABASE_URL
-# SUPABASE_SERVICE_ROLE_KEY   ← FIX #7: standardised name (was SUPABASE_SERVICE_ROLE)
+# Secrets — managed in Cloudflare dashboard (encrypted, never commit values here):
+# SUPABASE_SERVICE_ROLE_KEY
 # SUPABASE_ANON_KEY
 # INGEST_API_KEY
 # ANTHROPIC_API_KEY
-# ANTHROPIC_MODEL
+# ADMIN_TOKEN
+# JWT_SECRET
 
 [build]
 command = ""
