@@ -747,6 +747,7 @@ export default {
               block_rate: blockRate,
               success_rate: blockRate,
               completed_at: new Date().toISOString(),
+              analysis_completed_at: new Date().toISOString(),
             }),
           }
         );
