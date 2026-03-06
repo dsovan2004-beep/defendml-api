@@ -95,6 +95,33 @@ export default {
       return { ok: false, remaining: 0, retryAfter: Math.ceil((1 - state.tokens) / bucket.refillRatePerSec) || 1 };
     }
 
+    // -------- JWT verification via Supabase --------
+    // FIX #1: Verifies the caller's Supabase JWT and returns the user object.
+    // Also checks that the user belongs to the org that owns the target (ownership check).
+    async function verifyJWT(serviceKey) {
+      const authHeader = request.headers.get("authorization") || "";
+      const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+      if (!token) return { ok: false, status: 401, error: "missing_token" };
+
+      const SB_URL = env.SUPABASE_URL;
+      if (!SB_URL || !serviceKey) return { ok: false, status: 500, error: "supabase_not_configured" };
+
+      // Use Supabase anon key to verify the JWT (getUser endpoint)
+      const res = await fetch(`${SB_URL}/auth/v1/user`, {
+        headers: {
+          apikey: env.SUPABASE_ANON_KEY || serviceKey,
+          authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!res.ok) return { ok: false, status: 401, error: "invalid_token" };
+
+      const user = await res.json().catch(() => null);
+      if (!user || !user.id) return { ok: false, status: 401, error: "invalid_token" };
+
+      return { ok: true, user };
+    }
+
     // -------- global RL --------
     const rl = await rateLimit();
     if (!rl.ok) {
@@ -133,7 +160,9 @@ export default {
     // Metrics -> Supabase RPC: public.metrics_summary()
     if (url.pathname === "/metrics" && request.method === "GET") {
       try {
-        if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+        // FIX #7: use SUPABASE_SERVICE_ROLE_KEY (standardised name)
+        const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE;
+        if (!env.SUPABASE_URL || !serviceKey) {
           const r = withCORS(json({ success: false, error: "supabase_not_configured" }, 500), request);
           ctx.waitUntil(logEvent({ status: 500, action: "ERROR" }));
           return r;
@@ -142,8 +171,8 @@ export default {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            apikey: env.SUPABASE_ANON_KEY,
-            authorization: `Bearer ${env.SUPABASE_ANON_KEY}`,
+            apikey: serviceKey,
+            authorization: `Bearer ${serviceKey}`,
           },
           body: JSON.stringify({}),
         });
@@ -173,6 +202,8 @@ export default {
           return r;
         }
 
+        // FIX #7: accept both env var names gracefully
+        const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE;
         const body = await request.json().catch(() => ({}));
         const payload = {
           received_at: new Date().toISOString(),
@@ -206,13 +237,13 @@ export default {
           return r;
         }
 
-        if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE) {
+        if (env.SUPABASE_URL && serviceKey) {
           const res = await fetch(`${env.SUPABASE_URL}/rest/v1/detection_logs`, {
             method: "POST",
             headers: {
               "content-type": "application/json",
-              apikey: env.SUPABASE_SERVICE_ROLE,
-              authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE}`,
+              apikey: serviceKey,
+              authorization: `Bearer ${serviceKey}`,
               prefer: "return=minimal",
             },
             body: JSON.stringify({
@@ -246,7 +277,7 @@ export default {
       }
     }
 
-    // NEW: Audit ingestion -> Supabase REST: public.audit_logs
+    // Audit ingestion -> Supabase REST: public.audit_logs
     if (url.pathname === "/ingest/audit" && request.method === "POST") {
       try {
         const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
@@ -259,6 +290,9 @@ export default {
           ctx.waitUntil(logEvent({ status: 401, action: "BLOCKED" }));
           return r;
         }
+
+        // FIX #7: accept both env var names
+        const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE;
 
         const body = await request.json().catch(() => ({}));
 
@@ -276,7 +310,7 @@ export default {
           return r;
         }
 
-        if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE) {
+        if (!env.SUPABASE_URL || !serviceKey) {
           const r = withCORS(json({ success: false, error: "supabase_not_configured" }, 500), request);
           ctx.waitUntil(logEvent({ status: 500, action: "ERROR" }));
           return r;
@@ -286,8 +320,8 @@ export default {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            apikey: env.SUPABASE_SERVICE_ROLE,
-            authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE}`,
+            apikey: serviceKey,
+            authorization: `Bearer ${serviceKey}`,
             prefer: "return=representation",
           },
           body: JSON.stringify(row),
@@ -315,16 +349,27 @@ export default {
 
     // ======== RED TEAM EXECUTE ========
     // POST /api/red-team/execute
+    // FIX #1: JWT-verified + org ownership check added.
     // Body: { targetId: string }
-    // Fetches 100 prompts from red_team_tests, fires them at the target,
-    // stores results in red_team_results, summary in red_team_reports.
     if (url.pathname === "/api/red-team/execute" && request.method === "POST") {
       try {
-        if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE) {
+        // FIX #7: accept both env var names
+        const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE;
+
+        if (!env.SUPABASE_URL || !serviceKey) {
           const r = withCORS(json({ success: false, error: "supabase_not_configured" }, 500), request);
           ctx.waitUntil(logEvent({ status: 500, action: "ERROR" }));
           return r;
         }
+
+        // ── FIX #1a: Verify caller JWT ──────────────────────────────────────────
+        const auth = await verifyJWT(serviceKey);
+        if (!auth.ok) {
+          const r = withCORS(json({ success: false, error: auth.error }, auth.status), request);
+          ctx.waitUntil(logEvent({ status: auth.status, action: "BLOCKED" }));
+          return r;
+        }
+        const callerUserId = auth.user.id;
 
         const body = await request.json().catch(() => ({}));
         const { targetId } = body;
@@ -336,14 +381,14 @@ export default {
         }
 
         const SB_URL = env.SUPABASE_URL;
-        const SB_KEY = env.SUPABASE_SERVICE_ROLE;
         const sbHeaders = {
           "content-type": "application/json",
-          apikey: SB_KEY,
-          authorization: `Bearer ${SB_KEY}`,
+          apikey: serviceKey,
+          authorization: `Bearer ${serviceKey}`,
         };
 
-        // 1. Fetch target config from Supabase
+        // ── FIX #1b: Org ownership check ───────────────────────────────────────
+        // Fetch the target and verify the caller belongs to the same org.
         const targetRes = await fetch(
           `${SB_URL}/rest/v1/targets?id=eq.${encodeURIComponent(targetId)}&select=id,organization_id,name,url,api_key,custom_headers`,
           { headers: sbHeaders }
@@ -357,7 +402,19 @@ export default {
           return r;
         }
 
-        // 2. Fetch exactly 100 prompts from red_team_tests (ordered deterministically)
+        // Check caller is a member of the target's org
+        const memberRes = await fetch(
+          `${SB_URL}/rest/v1/organization_members?user_id=eq.${encodeURIComponent(callerUserId)}&organization_id=eq.${encodeURIComponent(target.organization_id)}&select=id&limit=1`,
+          { headers: sbHeaders }
+        );
+        const memberData = await memberRes.json().catch(() => []);
+        if (!Array.isArray(memberData) || memberData.length === 0) {
+          const r = withCORS(json({ success: false, error: "forbidden" }, 403), request);
+          ctx.waitUntil(logEvent({ status: 403, action: "BLOCKED" }));
+          return r;
+        }
+
+        // ── Fetch exactly 100 prompts ───────────────────────────────────────────
         const PROMPT_LIMIT = 100;
         const testsRes = await fetch(
           `${SB_URL}/rest/v1/red_team_tests?select=id,category,prompt_text,framework,severity&order=created_at.asc&limit=${PROMPT_LIMIT}`,
@@ -371,7 +428,7 @@ export default {
           return r;
         }
 
-        // 3. Create initial report row (placeholder counts, updated at end)
+        // ── Create initial report row ───────────────────────────────────────────
         const reportInsertRes = await fetch(`${SB_URL}/rest/v1/red_team_reports`, {
           method: "POST",
           headers: { ...sbHeaders, prefer: "return=representation" },
@@ -395,7 +452,7 @@ export default {
           return r;
         }
 
-        // 4. Build target request headers
+        // ── Build target request headers ────────────────────────────────────────
         const targetUrl = target.url;
         const targetHeaders = { "content-type": "application/json" };
         if (target.api_key) {
@@ -405,7 +462,7 @@ export default {
           Object.assign(targetHeaders, target.custom_headers);
         }
 
-        // Refusal phrase detection — classify response as BLOCK if model refused
+        // Refusal phrase detection
         const REFUSAL_PHRASES = [
           "i cannot", "i can't", "i'm unable", "i am unable",
           "sorry, i", "i apologize", "i'm not able", "i am not able",
@@ -422,7 +479,7 @@ export default {
           return isRefusal ? "BLOCK" : "ALLOW";
         }
 
-        // 5. Execute tests in parallel batches of 10
+        // ── Execute tests in parallel batches of 10 ─────────────────────────────
         const BATCH_SIZE = 10;
         const results = [];
 
@@ -442,7 +499,6 @@ export default {
                   method: "POST",
                   headers: targetHeaders,
                   body: JSON.stringify({ message: test.prompt_text }),
-                  // 8-second timeout per probe
                   signal: AbortSignal.timeout(8000),
                 });
 
@@ -477,7 +533,7 @@ export default {
           results.push(...batchResults);
         }
 
-        // 6. Bulk-insert all results into red_team_results
+        // ── Bulk-insert results ─────────────────────────────────────────────────
         if (results.length > 0) {
           await fetch(`${SB_URL}/rest/v1/red_team_results`, {
             method: "POST",
@@ -486,7 +542,7 @@ export default {
           });
         }
 
-        // 7. Tally final counts
+        // ── Tally and update report ─────────────────────────────────────────────
         let blocked = 0, allowed = 0, flagged = 0, errors = 0;
         for (const r of results) {
           if (r.decision === "BLOCK") blocked++;
@@ -498,7 +554,6 @@ export default {
           ? Math.round((blocked / results.length) * 100)
           : 0;
 
-        // 8. Update report with final counts
         await fetch(
           `${SB_URL}/rest/v1/red_team_reports?id=eq.${encodeURIComponent(report.id)}`,
           {
