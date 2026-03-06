@@ -596,7 +596,6 @@ export default {
             allowed_count: 0,
             flagged_count: 0,
             error_count: 0,
-            block_rate: 0,
           }),
         });
         const reportRaw = await reportInsertRes.text().catch(() => "");
@@ -736,7 +735,6 @@ export default {
               allowed_count: allowed,
               flagged_count: flagged,
               error_count: errors,
-              block_rate: blockRate,
             }),
           }
         );
