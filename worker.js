@@ -585,12 +585,17 @@ export default {
         }
 
         // ── Create initial report row ───────────────────────────────────────────
+        const generatedReportId = crypto.randomUUID();
         const reportInsertRes = await fetch(`${SB_URL}/rest/v1/red_team_reports`, {
           method: "POST",
           headers: { ...sbHeaders, prefer: "return=representation" },
           body: JSON.stringify({
+            report_id: generatedReportId,
+            target: targetUrl,
+            started_at: new Date().toISOString(),
             organization_id: orgId,
             target_id: targetId,
+            total_prompts: tests.length,
             total_tests: tests.length,
             blocked_count: 0,
             allowed_count: 0,
@@ -731,12 +736,15 @@ export default {
             method: "PATCH",
             headers: { ...sbHeaders, prefer: "return=minimal" },
             body: JSON.stringify({
+              total_prompts: results.length,
               total_tests: results.length,
               blocked_count: blocked,
               allowed_count: allowed,
               flagged_count: flagged,
               error_count: errors,
               block_rate: blockRate,
+              success_rate: blockRate,
+              completed_at: new Date().toISOString(),
             }),
           }
         );
