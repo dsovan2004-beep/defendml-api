@@ -428,10 +428,17 @@ export default {
           `${SB_URL}/rest/v1/red_team_tests?select=id,category,prompt_text,framework,severity&order=created_at.asc&limit=${PROMPT_LIMIT}`,
           { headers: sbHeaders }
         );
-        const tests = await testsRes.json().catch(() => []);
+        const testsRaw = await testsRes.text().catch(() => "");
+        let tests = [];
+        try { tests = JSON.parse(testsRaw); } catch { tests = []; }
 
         if (!Array.isArray(tests) || tests.length === 0) {
-          const r = withCORS(json({ success: false, error: "no_tests_found" }, 500), request);
+          const r = withCORS(json({
+            success: false,
+            error: "no_tests_found",
+            debug: testsRaw.slice(0, 300),
+            http_status: testsRes.status,
+          }, 500), request);
           ctx.waitUntil(logEvent({ status: 500, action: "ERROR" }));
           return r;
         }
