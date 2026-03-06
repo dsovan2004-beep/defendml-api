@@ -553,7 +553,7 @@ export default {
         ];
 
         const testsRes = await fetch(
-          `${SB_URL}/rest/v1/red_team_tests?select=id,category,prompt_text,framework,severity&order=created_at.asc&limit=${PROMPT_LIMIT}`,
+          `${SB_URL}/rest/v1/red_team_tests?select=*&order=created_at.asc&limit=${PROMPT_LIMIT}`,
           { headers: sbHeaders }
         );
         const testsRaw = await testsRes.text().catch(() => "");
