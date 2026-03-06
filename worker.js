@@ -695,9 +695,10 @@ export default {
               }
 
               return {
-                report_id: report.id,
-                test_id: test.id,
-                category: test.category,
+                report_uuid: report.id,
+                test_id: String(test.id),
+                category: test.category || null,
+                prompt_text: test.prompt_text || null,
                 decision,
                 status_code: statusCode,
                 detection_method: detectionMethod,
