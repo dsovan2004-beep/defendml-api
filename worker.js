@@ -584,6 +584,10 @@ export default {
           return r;
         }
 
+        // ── Build target URL (needed for report insert) ─────────────────────────
+        const targetUrl = (target.endpoint_path ? target.url + target.endpoint_path : target.url)
+          || body.target;
+
         // ── Create initial report row ───────────────────────────────────────────
         const generatedReportId = crypto.randomUUID();
         const reportInsertRes = await fetch(`${SB_URL}/rest/v1/red_team_reports`, {
@@ -621,9 +625,6 @@ export default {
         }
 
         // ── Build target request headers ────────────────────────────────────────
-        // Use endpoint_path if present, otherwise base url
-        const targetUrl = (target.endpoint_path ? target.url + target.endpoint_path : target.url)
-          || body.target;
         const targetHeaders = { "content-type": "application/json" };
         // Support both column names (api_key legacy, auth_token current) + body fallback
         const authToken = target.auth_token || target.api_key || body.auth_token;
