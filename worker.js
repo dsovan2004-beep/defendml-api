@@ -402,16 +402,22 @@ export default {
           return r;
         }
 
-        // Check caller is a member of the target's org
-        const memberRes = await fetch(
-          `${SB_URL}/rest/v1/organization_members?user_id=eq.${encodeURIComponent(callerUserId)}&organization_id=eq.${encodeURIComponent(target.organization_id)}&select=id&limit=1`,
-          { headers: sbHeaders }
-        );
-        const memberData = await memberRes.json().catch(() => []);
-        if (!Array.isArray(memberData) || memberData.length === 0) {
-          const r = withCORS(json({ success: false, error: "forbidden" }, 403), request);
-          ctx.waitUntil(logEvent({ status: 403, action: "BLOCKED" }));
-          return r;
+        // Superadmin bypass — skip org membership check for dsovan2004@gmail.com
+        const SUPERADMIN_EMAIL = "dsovan2004@gmail.com";
+        const isSuperadmin = auth.user.email === SUPERADMIN_EMAIL;
+
+        if (!isSuperadmin) {
+          // Check caller is a member of the target's org
+          const memberRes = await fetch(
+            `${SB_URL}/rest/v1/organization_members?user_id=eq.${encodeURIComponent(callerUserId)}&organization_id=eq.${encodeURIComponent(target.organization_id)}&select=id&limit=1`,
+            { headers: sbHeaders }
+          );
+          const memberData = await memberRes.json().catch(() => []);
+          if (!Array.isArray(memberData) || memberData.length === 0) {
+            const r = withCORS(json({ success: false, error: "forbidden" }, 403), request);
+            ctx.waitUntil(logEvent({ status: 403, action: "BLOCKED" }));
+            return r;
+          }
         }
 
         // ── Fetch exactly 100 prompts ───────────────────────────────────────────
