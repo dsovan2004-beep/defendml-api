@@ -566,12 +566,30 @@ export default {
           tests = BUILTIN_TESTS;
         }
 
+        // ── Resolve organization_id (fallback to first org if target has none) ──
+        let orgId = target.organization_id;
+        if (!orgId) {
+          // Target was created without an org (legacy/superadmin) — pick any org
+          const orgRes = await fetch(
+            `${SB_URL}/rest/v1/organizations?select=id&order=created_at.asc&limit=1`,
+            { headers: sbHeaders }
+          );
+          const orgData = await orgRes.json().catch(() => []);
+          orgId = Array.isArray(orgData) && orgData[0] ? orgData[0].id : null;
+        }
+
+        if (!orgId) {
+          const r = withCORS(json({ success: false, error: "no_organization_found", hint: "Create an organization in Supabase first" }, 500), request);
+          ctx.waitUntil(logEvent({ status: 500, action: "ERROR" }));
+          return r;
+        }
+
         // ── Create initial report row ───────────────────────────────────────────
         const reportInsertRes = await fetch(`${SB_URL}/rest/v1/red_team_reports`, {
           method: "POST",
           headers: { ...sbHeaders, prefer: "return=representation" },
           body: JSON.stringify({
-            organization_id: target.organization_id,
+            organization_id: orgId,
             target_id: targetId,
             total_tests: tests.length,
             blocked_count: 0,
@@ -581,11 +599,18 @@ export default {
             block_rate: 0,
           }),
         });
-        const reportInsertData = await reportInsertRes.json().catch(() => []);
+        const reportRaw = await reportInsertRes.text().catch(() => "");
+        let reportInsertData;
+        try { reportInsertData = JSON.parse(reportRaw); } catch { reportInsertData = []; }
         const report = Array.isArray(reportInsertData) ? reportInsertData[0] : reportInsertData;
 
         if (!report || !report.id) {
-          const r = withCORS(json({ success: false, error: "failed_to_create_report" }, 500), request);
+          const r = withCORS(json({
+            success: false,
+            error: "failed_to_create_report",
+            debug: reportRaw.slice(0, 400),
+            http_status: reportInsertRes.status,
+          }, 500), request);
           ctx.waitUntil(logEvent({ status: 500, action: "ERROR" }));
           return r;
         }
