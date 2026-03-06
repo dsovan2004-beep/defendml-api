@@ -390,14 +390,16 @@ export default {
         // ── FIX #1b: Org ownership check ───────────────────────────────────────
         // Fetch the target and verify the caller belongs to the same org.
         const targetRes = await fetch(
-          `${SB_URL}/rest/v1/targets?id=eq.${encodeURIComponent(targetId)}&select=id,organization_id,name,url,api_key,custom_headers`,
+          `${SB_URL}/rest/v1/targets?id=eq.${encodeURIComponent(targetId)}&select=*`,
           { headers: sbHeaders }
         );
         const targetData = await targetRes.json().catch(() => []);
         const target = Array.isArray(targetData) ? targetData[0] : null;
 
         if (!target) {
-          const r = withCORS(json({ success: false, error: "target_not_found" }, 404), request);
+          // Debug: log what Supabase actually returned
+          const debugInfo = JSON.stringify(targetData).slice(0, 200);
+          const r = withCORS(json({ success: false, error: "target_not_found", debug: debugInfo }, 404), request);
           ctx.waitUntil(logEvent({ status: 404, action: "ERROR" }));
           return r;
         }
@@ -459,10 +461,18 @@ export default {
         }
 
         // ── Build target request headers ────────────────────────────────────────
-        const targetUrl = target.url;
+        // Use endpoint_path if present, otherwise base url
+        const targetUrl = (target.endpoint_path ? target.url + target.endpoint_path : target.url)
+          || body.target;
         const targetHeaders = { "content-type": "application/json" };
-        if (target.api_key) {
-          targetHeaders["authorization"] = `Bearer ${target.api_key}`;
+        // Support both column names (api_key legacy, auth_token current) + body fallback
+        const authToken = target.auth_token || target.api_key || body.auth_token;
+        const authHeaderName = target.auth_header_name || body.auth_header_name || "authorization";
+        const authMethod = target.auth_method || body.auth_method || "none";
+        if (authToken && authMethod !== "none") {
+          targetHeaders[authHeaderName.toLowerCase()] = authMethod === "api_key"
+            ? authToken
+            : `Bearer ${authToken}`;
         }
         if (target.custom_headers && typeof target.custom_headers === "object") {
           Object.assign(targetHeaders, target.custom_headers);
