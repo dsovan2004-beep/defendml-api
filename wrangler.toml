@@ -16,7 +16,7 @@ id = "e30011d67c0a47c395da47751419cd58"
 
 # Default Variables
 [vars]
-CORS_ORIGIN = "https://defendml.com,https://www.defendml.com,https://app.defendml.com,https://defendml-app.pages.dev,https://console.betaml.ai,https://betaml.ai,https://freeai.defendml.com,https://beta.defendml.com"
+CORS_ORIGIN = "https://defendml.com,https://www.defendml.com,https://app.defendml.com,https://defendml-app.pages.dev,https://console.betaml.ai,https://betaml.ai,https://freeai.defendml.com,https://beta.defendml.com,https://app.defendml.ai,https://defendml.ai"
 MOCK_MODE = "false"
 STRICT_MODE = "false"
 SUPABASE_URL = "https://rhwvzhksjbsdymvvzxln.supabase.co"
