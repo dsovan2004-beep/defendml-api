@@ -851,6 +851,61 @@ export default {
           console.warn(`[fix-318] DB fetch error: ${e.message}. MCP + ASI03-10 coverage degraded for this scan.`);
         }
 
+        // FIX #322 (2026-05-20): Phase 12 per-scan reference. Load
+        // approved_reference_only threat_intel_patterns at scan startup.
+        // Filter by target.detected_architecture if known (Phase 8 column,
+        // populated by future architecture-detection v1). All 9 agents can
+        // reference these via THREAT_INTEL_PATTERNS; Scout surfaces them
+        // additively in its initial pass (+up to 5 prompts on top of base 20).
+        // Fail-safe: DB unavailable = empty array = scan continues with
+        // current coverage. Currently zero approved_reference_only patterns
+        // (Phase 12 cron not yet wired) — so this is dormant infrastructure
+        // that activates the moment the first pattern is promoted.
+        let THREAT_INTEL_PATTERNS = [];
+        try {
+          const SB_URL_TI = env.SUPABASE_URL || 'https://rhwvzhksjbsdymvvzxln.supabase.co';
+          const tiRes = await fetch(
+            `${SB_URL_TI}/rest/v1/threat_intel_patterns?promotion_status=eq.approved_reference_only&select=id,pattern_text,category,severity,architectures&limit=20`,
+            {
+              headers: {
+                apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+                Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+              },
+            }
+          );
+          if (tiRes.ok) {
+            const tiRows = await tiRes.json();
+            // Filter by target architecture if known. Architectures is a jsonb
+            // array; include patterns with no architectures restriction OR
+            // with the target's architecture in their list.
+            const targetArch = target?.detected_architecture || null;
+            const filtered = targetArch
+              ? tiRows.filter(r => {
+                  if (!Array.isArray(r.architectures) || r.architectures.length === 0) return true;
+                  return r.architectures.includes(targetArch);
+                })
+              : tiRows;
+            // Normalize to red_team_tests shape so executeBatch can run them
+            THREAT_INTEL_PATTERNS = filtered.slice(0, 5).map(r => ({
+              id: `threat-intel-${String(r.id).slice(0, 8)}`,
+              category: r.category,
+              severity: r.severity || 'medium',
+              prompt_text: r.pattern_text,
+              threat_intel: true, // marker for future evidence report Section 11
+            }));
+            console.log(`[phase-12] Loaded ${THREAT_INTEL_PATTERNS.length} threat-intel patterns (target arch: ${targetArch || 'any'})`);
+          } else {
+            console.warn(`[phase-12] DB fetch failed (${tiRes.status}). Threat-intel reference unavailable for this scan.`);
+          }
+        } catch (e) {
+          console.warn(`[phase-12] DB fetch error: ${e.message}. Threat-intel reference unavailable for this scan.`);
+        }
+        // Surface to swarmIntel so post-scan aggregator + future Section 11
+        // can reference which patterns were consulted (not just executed).
+        swarmIntel.threatIntelPatternsConsulted = THREAT_INTEL_PATTERNS.map(p => ({
+          id: p.id, category: p.category, severity: p.severity,
+        }));
+
         // ── AGENT 1: Scout — Recon (20 prompts: 2 per canonical category) ──
         async function runScoutAgent() {
           console.log("[swarm] 🐝1 Scout Agent starting...");
@@ -863,6 +918,11 @@ export default {
             prompts = [...prompts, ...filler.slice(0, SCOUT_TARGET - prompts.length)];
           }
           prompts = prompts.slice(0, SCOUT_TARGET);
+          // FIX #322: append threat-intel patterns additively (Phase 12 per-scan reference)
+          if (THREAT_INTEL_PATTERNS.length > 0) {
+            prompts = [...prompts, ...THREAT_INTEL_PATTERNS];
+            console.log(`[swarm] 🐝1 Scout: +${THREAT_INTEL_PATTERNS.length} threat-intel patterns appended`);
+          }
           const agentResults = await executeBatch(prompts);
           // Record per-category results
           // FIX #165: Separate ALLOW from FLAG — FLAG = ambiguous, not a confirmed bypass.
