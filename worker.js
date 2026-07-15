@@ -67,7 +67,22 @@ export function safeTargetUrl(rawUrl) {
   }
 }
 
-export default {
+export const SCAN_JOB_TRANSITIONS = Object.freeze({
+  queued: Object.freeze(["running", "failed"]),
+  running: Object.freeze(["queued", "completed", "failed"]),
+  completed: Object.freeze([]),
+  failed: Object.freeze([]),
+});
+
+export function canTransitionScanJob(from, to) {
+  return Boolean(SCAN_JOB_TRANSITIONS[from]?.includes(to));
+}
+
+export function buildScanJobMessage(jobId) {
+  return { jobId };
+}
+
+const worker = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const started = Date.now();
@@ -455,6 +470,72 @@ export default {
       }
     }
 
+    // ======== DURABLE SCAN DISPATCH ========
+    // POST /api/scan-jobs/dispatch
+    // Authenticated producer: creates the durable queued report before enqueueing.
+    if (url.pathname === "/api/scan-jobs/dispatch" && request.method === "POST") {
+      const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE;
+      if (!env.SUPABASE_URL || !serviceKey || !env.SCAN_JOBS) {
+        return withCORS(json({ success: false, error: "scan_dispatch_unavailable" }, 503), request);
+      }
+
+      const auth = await verifyJWT(serviceKey);
+      if (!auth.ok) return withCORS(json({ success: false, error: auth.error }, auth.status), request);
+
+      const body = await request.json().catch(() => ({}));
+      const targetId = typeof body.targetId === "string" ? body.targetId : "";
+      const objective = typeof body.custom_objective === "string" ? body.custom_objective.trim().slice(0, 200) : "";
+      if (!targetId || body.authorization_confirmed !== true) {
+        return withCORS(json({ success: false, error: "authorization_confirmation_required" }, 400), request);
+      }
+
+      const SB_URL = env.SUPABASE_URL;
+      const sbHeaders = { "content-type": "application/json", apikey: serviceKey, authorization: `Bearer ${serviceKey}` };
+      const targetRes = await fetch(`${SB_URL}/rest/v1/targets?id=eq.${encodeURIComponent(targetId)}&select=id,name,url,endpoint_path,organization_id,is_active&limit=1`, { headers: sbHeaders });
+      const targets = await targetRes.json().catch(() => []);
+      const target = Array.isArray(targets) ? targets[0] : null;
+      if (!target || !target.is_active) return withCORS(json({ success: false, error: "target_not_found" }, 404), request);
+
+      if (auth.user.email !== "dsovan2004@gmail.com") {
+        const memberRes = await fetch(`${SB_URL}/rest/v1/organization_members?user_id=eq.${encodeURIComponent(auth.user.id)}&organization_id=eq.${encodeURIComponent(target.organization_id)}&select=id&limit=1`, { headers: sbHeaders });
+        const members = await memberRes.json().catch(() => []);
+        if (!Array.isArray(members) || members.length === 0) return withCORS(json({ success: false, error: "forbidden" }, 403), request);
+      }
+
+      const activeRes = await fetch(`${SB_URL}/rest/v1/red_team_reports?target_id=eq.${encodeURIComponent(targetId)}&job_state=in.(queued,running)&select=report_id,job_state&order=queued_at.desc&limit=1`, { headers: sbHeaders });
+      const active = await activeRes.json().catch(() => []);
+      if (Array.isArray(active) && active[0]) {
+        return withCORS(json({ success: true, job_id: active[0].report_id, state: active[0].job_state }, 202), request);
+      }
+
+      const now = new Date().toISOString();
+      const jobId = crypto.randomUUID();
+      const targetUrl = safeTargetUrl(`${target.url || ""}${target.endpoint_path || ""}`);
+      const row = {
+        report_id: jobId, target: targetUrl, target_id: target.id, organization_id: target.organization_id,
+        started_at: now, queued_at: now, job_state: "queued", requested_by: auth.user.id,
+        custom_objective: objective || null, dispatch_key: crypto.randomUUID(), dispatch_attempts: 0,
+        total_tests: 0, total_prompts: 0, blocked_count: 0, flagged_count: 0, allowed_count: 0, error_count: 0,
+      };
+      const insertRes = await fetch(`${SB_URL}/rest/v1/red_team_reports`, { method: "POST", headers: { ...sbHeaders, prefer: "return=representation" }, body: JSON.stringify(row) });
+      if (!insertRes.ok) {
+        const raceRes = await fetch(`${SB_URL}/rest/v1/red_team_reports?target_id=eq.${encodeURIComponent(targetId)}&job_state=in.(queued,running)&select=report_id,job_state&order=queued_at.desc&limit=1`, { headers: sbHeaders });
+        const race = await raceRes.json().catch(() => []);
+        if (Array.isArray(race) && race[0]) return withCORS(json({ success: true, job_id: race[0].report_id, state: race[0].job_state }, 202), request);
+        return withCORS(json({ success: false, error: "scan_dispatch_failed" }, 500), request);
+      }
+
+      try {
+        await env.SCAN_JOBS.send(buildScanJobMessage(jobId));
+      } catch (_) {
+        await fetch(`${SB_URL}/rest/v1/red_team_reports?report_id=eq.${jobId}&job_state=eq.queued`, { method: "PATCH", headers: sbHeaders, body: JSON.stringify({ job_state: "failed", failed_at: new Date().toISOString(), failure_code: "DISPATCH_UNAVAILABLE" }) });
+        return withCORS(json({ success: false, error: "scan_dispatch_unavailable" }, 503), request);
+      }
+      await fetch(`${SB_URL}/rest/v1/red_team_reports?report_id=eq.${jobId}`, { method: "PATCH", headers: sbHeaders, body: JSON.stringify({ dispatch_attempts: 1, last_dispatched_at: new Date().toISOString() }) });
+      await fetch(`${SB_URL}/rest/v1/targets?id=eq.${encodeURIComponent(target.id)}`, { method: "PATCH", headers: sbHeaders, body: JSON.stringify({ last_scan_status: "queued" }) });
+      return withCORS(json({ success: true, job_id: jobId, state: "queued" }, 202), request);
+    }
+
     // ======== RED TEAM EXECUTE ========
     // POST /api/red-team/execute
     // FIX #1: JWT-verified + org ownership check added.
@@ -470,20 +551,43 @@ export default {
           return r;
         }
 
-        // ── FIX #1a: Verify caller JWT ──────────────────────────────────────────
-        const auth = await verifyJWT(serviceKey);
-        if (!auth.ok) {
-          const r = withCORS(json({ success: false, error: auth.error }, auth.status), request);
-          ctx.waitUntil(logEvent({ status: auth.status, action: "BLOCKED" }));
-          return r;
+        const body = await request.json().catch(() => ({}));
+        const internalJobId = typeof body.jobId === "string" ? body.jobId : "";
+        const internalJob = Boolean(
+          internalJobId && env.SCAN_JOB_INTERNAL_TOKEN &&
+          request.headers.get("x-scan-job-token") === env.SCAN_JOB_INTERNAL_TOKEN
+        );
+        const SB_URL = env.SUPABASE_URL;
+        const sbHeaders = {
+          "content-type": "application/json",
+          apikey: serviceKey,
+          authorization: `Bearer ${serviceKey}`,
+        };
+
+        let jobRecord = null;
+        let auth;
+        if (internalJob) {
+          const jobRes = await fetch(`${SB_URL}/rest/v1/red_team_reports?report_id=eq.${encodeURIComponent(internalJobId)}&job_state=eq.running&select=id,report_id,target_id,organization_id,requested_by,custom_objective&limit=1`, { headers: sbHeaders });
+          const jobs = await jobRes.json().catch(() => []);
+          jobRecord = Array.isArray(jobs) ? jobs[0] : null;
+          if (!jobRecord) return withCORS(json({ success: false, error: "scan_job_not_runnable" }, 409), request);
+          const userRes = await fetch(`${SB_URL}/rest/v1/users?auth_user_id=eq.${encodeURIComponent(jobRecord.requested_by)}&select=email&limit=1`, { headers: sbHeaders });
+          const users = await userRes.json().catch(() => []);
+          auth = { ok: true, user: { id: jobRecord.requested_by, email: Array.isArray(users) ? users[0]?.email : "" } };
+        } else {
+          auth = await verifyJWT(serviceKey);
+          if (!auth.ok) {
+            const r = withCORS(json({ success: false, error: auth.error }, auth.status), request);
+            ctx.waitUntil(logEvent({ status: auth.status, action: "BLOCKED" }));
+            return r;
+          }
         }
         const callerUserId = auth.user.id;
-
-        const body = await request.json().catch(() => ({}));
-        const { targetId } = body;
+        const targetId = internalJob ? jobRecord.target_id : body.targetId;
         // FIX #177: Customer-defined attack objective (optional). Clamp to 500 chars server-side.
-        const customObjective = typeof body.custom_objective === "string"
-          ? body.custom_objective.trim().slice(0, 500)
+        const objectiveValue = internalJob ? jobRecord.custom_objective : body.custom_objective;
+        const customObjective = typeof objectiveValue === "string"
+          ? objectiveValue.trim().slice(0, 500)
           : "";
 
         if (!targetId) {
@@ -491,13 +595,6 @@ export default {
           ctx.waitUntil(logEvent({ status: 400, action: "ERROR" }));
           return r;
         }
-
-        const SB_URL = env.SUPABASE_URL;
-        const sbHeaders = {
-          "content-type": "application/json",
-          apikey: serviceKey,
-          authorization: `Bearer ${serviceKey}`,
-        };
 
         // ── FIX #1b: Org ownership check ───────────────────────────────────────
         // Fetch the target and verify the caller belongs to the same org.
@@ -520,7 +617,7 @@ export default {
         const SUPERADMIN_EMAIL = "dsovan2004@gmail.com";
         const isSuperadmin = auth.user.email === SUPERADMIN_EMAIL;
 
-        if (!isSuperadmin) {
+        if (!internalJob && !isSuperadmin) {
           // Check caller is a member of the target's org
           const memberRes = await fetch(
             `${SB_URL}/rest/v1/organization_members?user_id=eq.${encodeURIComponent(callerUserId)}&organization_id=eq.${encodeURIComponent(target.organization_id)}&select=id&limit=1`,
@@ -1549,7 +1646,7 @@ export default {
 
         // ── Create initial report row ───────────────────────────────────────────
         const generatedReportId = crypto.randomUUID();
-        const reportInsertRes = await fetch(`${SB_URL}/rest/v1/red_team_reports`, {
+        const reportInsertRes = internalJob ? null : await fetch(`${SB_URL}/rest/v1/red_team_reports`, {
           method: "POST",
           headers: { ...sbHeaders, prefer: "return=representation" },
           body: JSON.stringify({
@@ -1567,20 +1664,28 @@ export default {
             block_rate: 0,
           }),
         });
-        const reportRaw = await reportInsertRes.text().catch(() => "");
+        const reportRaw = internalJob ? "" : await reportInsertRes.text().catch(() => "");
         let reportInsertData;
         try { reportInsertData = JSON.parse(reportRaw); } catch { reportInsertData = []; }
-        const report = Array.isArray(reportInsertData) ? reportInsertData[0] : reportInsertData;
+        const report = internalJob ? jobRecord : (Array.isArray(reportInsertData) ? reportInsertData[0] : reportInsertData);
 
         if (!report || !report.id) {
           const r = withCORS(json({
             success: false,
             error: "failed_to_create_report",
             debug: sanitizeTargetEvidence(reportRaw).slice(0, 400),
-            http_status: reportInsertRes.status,
+            http_status: reportInsertRes?.status || 500,
           }, 500), request);
           ctx.waitUntil(logEvent({ status: 500, action: "ERROR" }));
           return r;
+        }
+
+        if (internalJob) {
+          const cleanupRes = await fetch(`${SB_URL}/rest/v1/red_team_results?report_uuid=eq.${encodeURIComponent(report.id)}`, {
+            method: "DELETE",
+            headers: sbHeaders,
+          });
+          if (!cleanupRes.ok) return withCORS(json({ success: false, error: "result_retry_cleanup_failed" }, 500), request);
         }
 
         // ── Build target request headers ────────────────────────────────────────
@@ -1916,6 +2021,7 @@ export default {
                   total_latency_ms: Date.now() - scanStart,
                   completed_at: completedAt,
                   analysis_completed_at: completedAt,
+                  ...(internalJob ? { job_state: "failed", failed_at: completedAt, failure_code: "INVALID_TARGET" } : {}),
                   layer_breakdown: invalidLayerBreakdown,
                 }),
               }
@@ -2584,6 +2690,7 @@ export default {
               total_latency_ms: Date.now() - scanStart,
               completed_at: new Date().toISOString(),
               analysis_completed_at: new Date().toISOString(),
+              ...(internalJob ? { job_state: "completed", failure_code: null, failed_at: null } : {}),
               attack_intelligence: sanitizeTargetEvidence(attack_intelligence),
               remediation_playbook: sanitizeTargetEvidence(remediation_playbook),
               layer_breakdown: sanitizeTargetEvidence(swarm_phases),
@@ -2592,6 +2699,21 @@ export default {
         );
         const patchRaw = await patchRes.text().catch(() => "");
         const patchOk = patchRes.ok;
+        if (!patchOk) {
+          return withCORS(json({ success: false, error: "report_completion_write_failed" }, 500), request);
+        }
+        if (patchOk) {
+          await fetch(`${SB_URL}/rest/v1/targets?id=eq.${encodeURIComponent(targetId)}`, {
+            method: "PATCH",
+            headers: sbHeaders,
+            body: JSON.stringify({
+              last_scan_at: new Date().toISOString(),
+              last_report_id: report.id,
+              last_scan_status: "completed",
+              total_scans: Number(target.total_scans || 0) + 1,
+            }),
+          });
+        }
 
         // ── FIX #94: Swarm Memory — post-scan upsert ───────────────────────────
         // Group results by category, calculate per-category bypass rate,
@@ -2743,4 +2865,83 @@ export default {
     ctx.waitUntil(logEvent({ status: 404, action: "NF" }));
     return nf;
   },
+
+  async queue(batch, env, ctx) {
+    const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE;
+    if (!env.SUPABASE_URL || !serviceKey || !env.SCAN_JOB_INTERNAL_TOKEN) {
+      for (const message of batch.messages) message.retry({ delaySeconds: 60 });
+      return;
+    }
+    const headers = { "content-type": "application/json", apikey: serviceKey, authorization: `Bearer ${serviceKey}` };
+    const patchJob = (jobId, state, body) => fetch(
+      `${env.SUPABASE_URL}/rest/v1/red_team_reports?report_id=eq.${encodeURIComponent(jobId)}&job_state=eq.${state}`,
+      { method: "PATCH", headers: { ...headers, prefer: "return=representation" }, body: JSON.stringify(body) }
+    );
+
+    for (const message of batch.messages) {
+      const jobId = typeof message.body?.jobId === "string" ? message.body.jobId : "";
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)) {
+        message.ack();
+        continue;
+      }
+
+      try {
+        const jobRes = await fetch(`${env.SUPABASE_URL}/rest/v1/red_team_reports?report_id=eq.${encodeURIComponent(jobId)}&select=job_state,job_started_at,target_id&limit=1`, { headers });
+        const jobs = await jobRes.json().catch(() => []);
+        const job = Array.isArray(jobs) ? jobs[0] : null;
+        if (!job || job.job_state === "completed" || job.job_state === "failed") {
+          message.ack();
+          continue;
+        }
+        if (job.job_state === "running") {
+          const ageMs = Date.now() - Date.parse(job.job_started_at || 0);
+          if (Number.isFinite(ageMs) && ageMs < 15 * 60 * 1000) {
+            message.ack();
+            continue;
+          }
+          await patchJob(jobId, "running", { job_state: "queued", job_started_at: null, failure_code: null });
+          message.retry({ delaySeconds: 5 });
+          continue;
+        }
+
+        const startedAt = new Date().toISOString();
+        const claimRes = await patchJob(jobId, "queued", { job_state: "running", job_started_at: startedAt, failure_code: null });
+        const claimed = await claimRes.json().catch(() => []);
+        if (!claimRes.ok || !Array.isArray(claimed) || claimed.length !== 1) {
+          message.retry({ delaySeconds: 5 });
+          continue;
+        }
+        await fetch(`${env.SUPABASE_URL}/rest/v1/targets?id=eq.${encodeURIComponent(claimed[0].target_id || job.target_id)}`, { method: "PATCH", headers, body: JSON.stringify({ last_scan_status: "running" }) });
+
+        const response = await worker.fetch(new Request("https://internal.defendml/api/red-team/execute", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-scan-job-token": env.SCAN_JOB_INTERNAL_TOKEN },
+          body: JSON.stringify({ jobId }),
+        }), env, ctx);
+
+        if (response.ok) {
+          message.ack();
+          continue;
+        }
+        if (response.status >= 400 && response.status < 500) {
+          const code = response.status === 422 ? "INVALID_TARGET" : "WORKER_REJECTED";
+          await patchJob(jobId, "running", { job_state: "failed", failed_at: new Date().toISOString(), failure_code: code });
+          await fetch(`${env.SUPABASE_URL}/rest/v1/targets?id=eq.${encodeURIComponent(job.target_id)}`, { method: "PATCH", headers, body: JSON.stringify({ last_scan_status: "failed" }) });
+          message.ack();
+          continue;
+        }
+        throw new Error("worker_execution_failed");
+      } catch (_) {
+        if (message.attempts >= 3) {
+          await patchJob(jobId, "running", { job_state: "failed", failed_at: new Date().toISOString(), failure_code: "WORKER_RETRY_EXHAUSTED" }).catch(() => null);
+          message.ack();
+        } else {
+          await patchJob(jobId, "running", { job_state: "queued", job_started_at: null, failure_code: null }).catch(() => null);
+          message.retry({ delaySeconds: Math.min(60, 15 * message.attempts) });
+        }
+      }
+    }
+  },
 };
+
+export default worker;

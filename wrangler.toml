@@ -14,6 +14,17 @@ id = "a3c27a772f0746e183be83a924a4d94b"
 binding = "AUDIT_LOG"
 id = "e30011d67c0a47c395da47751419cd58"
 
+[[queues.producers]]
+binding = "SCAN_JOBS"
+queue = "defendml-scan-jobs"
+
+[[queues.consumers]]
+queue = "defendml-scan-jobs"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 3
+dead_letter_queue = "defendml-scan-jobs-dlq"
+
 # Default Variables
 [vars]
 CORS_ORIGIN = "https://defendml.com,https://www.defendml.com,https://app.defendml.com,https://defendml-app.pages.dev,https://console.betaml.ai,https://betaml.ai,https://freeai.defendml.com,https://beta.defendml.com,https://app.defendml.ai,https://defendml.ai"
