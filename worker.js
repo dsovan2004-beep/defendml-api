@@ -484,8 +484,9 @@ const worker = {
 
       const body = await request.json().catch(() => ({}));
       const targetId = typeof body.targetId === "string" ? body.targetId : "";
+      const grantId = typeof body.grant_id === "string" ? body.grant_id : "";
       const objective = typeof body.custom_objective === "string" ? body.custom_objective.trim().slice(0, 200) : "";
-      if (!targetId || body.authorization_confirmed !== true) {
+      if (!targetId || !grantId) {
         return withCORS(json({ success: false, error: "authorization_confirmation_required" }, 400), request);
       }
 
@@ -501,6 +502,21 @@ const worker = {
         const members = await memberRes.json().catch(() => []);
         if (!Array.isArray(members) || members.length === 0) return withCORS(json({ success: false, error: "forbidden" }, 403), request);
       }
+
+      const consumeRes = await fetch(`${SB_URL}/rest/v1/rpc/consume_attack_authorization_grant`, {
+        method: "POST",
+        headers: sbHeaders,
+        body: JSON.stringify({
+          p_grant_id: grantId,
+          p_user_id: auth.user.id,
+          p_organization_id: target.organization_id,
+          p_target_id: target.id,
+          p_objective: objective,
+        }),
+      });
+      const consumed = await consumeRes.json().catch(() => false);
+      if (!consumeRes.ok) return withCORS(json({ success: false, error: "authorization_verification_unavailable" }, 503), request);
+      if (consumed !== true) return withCORS(json({ success: false, error: "authorization_grant_invalid" }, 403), request);
 
       const activeRes = await fetch(`${SB_URL}/rest/v1/red_team_reports?target_id=eq.${encodeURIComponent(targetId)}&job_state=in.(queued,running)&select=report_id,job_state&order=queued_at.desc&limit=1`, { headers: sbHeaders });
       const active = await activeRes.json().catch(() => []);
@@ -581,6 +597,7 @@ const worker = {
             ctx.waitUntil(logEvent({ status: auth.status, action: "BLOCKED" }));
             return r;
           }
+          return withCORS(json({ success: false, error: "verified_authorization_grant_required" }, 403), request);
         }
         const callerUserId = auth.user.id;
         const targetId = internalJob ? jobRecord.target_id : body.targetId;
