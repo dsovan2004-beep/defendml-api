@@ -12,7 +12,24 @@ test("1 authorized dispatch persists a queued report before enqueue", () => asse
 test("2 dispatch returns 202", () => assert.match(source, /job_id: jobId, state: "queued" }, 202/));
 test("3 unauthenticated dispatch is rejected", () => assert.match(source, /const auth = await verifyJWT\(serviceKey\);[\s\S]*if \(!auth\.ok\)/));
 test("4 cross-tenant dispatch is rejected", () => assert.match(source, /organization_members\?user_id=[\s\S]*error: "forbidden"/));
-test("5 authorization confirmation is required", () => assert.match(source, /authorization_confirmed !== true/));
+test("5 caller-bound grant is consumed successfully before enqueue", () => {
+  const dispatch = source.slice(source.indexOf('// ======== DURABLE SCAN DISPATCH'), source.indexOf('// ======== RED TEAM EXECUTE'));
+  assert.match(dispatch, /typeof body\.grant_id === "string"/);
+  assert.match(dispatch, /if \(!targetId \|\| !grantId\)/);
+  assert.doesNotMatch(dispatch, /authorization_confirmed/);
+  for (const binding of [
+    'p_grant_id: grantId', 'p_user_id: auth.user.id',
+    'p_organization_id: target.organization_id', 'p_target_id: target.id',
+    'p_objective: objective',
+  ]) assert.ok(dispatch.includes(binding), `Missing grant binding: ${binding}`);
+  const consume = dispatch.indexOf('/rpc/consume_attack_authorization_grant');
+  const unavailable = dispatch.indexOf('if (!consumeRes.ok)');
+  const denied = dispatch.indexOf('if (consumed !== true)');
+  const enqueue = dispatch.indexOf('env.SCAN_JOBS.send(');
+  assert.ok(consume > 0 && consume < unavailable && unavailable < denied && denied < enqueue);
+  assert.match(dispatch, /if \(!consumeRes\.ok\) return .*authorization_verification_unavailable.*503/);
+  assert.match(dispatch, /if \(consumed !== true\) return .*authorization_grant_invalid.*403/);
+});
 test("6 queue payload contains only job ID", () => assert.deepEqual(Object.keys(buildScanJobMessage(crypto.randomUUID())), ["jobId"]));
 test("7 queued transitions to running", () => assert.equal(canTransitionScanJob("queued", "running"), true));
 test("8 running transitions to completed", () => assert.equal(canTransitionScanJob("running", "completed"), true));
