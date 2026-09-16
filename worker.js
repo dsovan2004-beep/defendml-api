@@ -1,3 +1,4 @@
+import { isQualifiedMemory, qualifiesMemoryOutcome, MEMORY_QUALIFICATION_VERSION } from './memory-qualification.mjs';
 export const TARGET_SECRET_REDACTION_MARKER = "[REDACTED_TARGET_SECRET]";
 export const TARGET_SECRET_MIN_LENGTH = 8;
 
@@ -978,7 +979,7 @@ const worker = {
 
         // Build memory lookup by canonical category
         const memoryByCategory = {};
-        for (const mem of swarmMemory) {
+        for (const mem of swarmMemory.filter(isQualifiedMemory)) {
           memoryByCategory[mem.category] = mem;
         }
 
@@ -2746,7 +2747,7 @@ const worker = {
           // response_text classification ships). Previously only allowed/blocked
           // were tracked; FLAG was bucketed with ALLOW for memory weakness scoring.
           const memCategoryMap = {};
-          for (const r of persistedResults) {
+          for (const r of persistedResults.filter(qualifiesMemoryOutcome)) {
             const cat = toCanonical(r.category) || r.category || "uncategorized";
             if (!memCategoryMap[cat]) {
               memCategoryMap[cat] = {
@@ -2769,23 +2770,37 @@ const worker = {
           }
 
           // Fetch existing memory rows for this target to get current scan_count
-          let existingMemory = [];
-          const existMemRes = await fetch(
-            `${SB_URL}/rest/v1/target_memory?target_id=eq.${encodeURIComponent(targetId)}&select=category,scan_count,successful_prompts,failed_prompts`,
-            { headers: sbHeaders }
-          );
-          if (existMemRes.ok) {
-            try { existingMemory = JSON.parse(await existMemRes.text()); } catch { existingMemory = []; }
-            if (!Array.isArray(existingMemory)) existingMemory = [];
+          const existingMemory = [];
+          let memoryTotal = null;
+          for (let offset = 0; ; offset += 500) {
+            const existMemRes = await fetch(
+              `${SB_URL}/rest/v1/target_memory?target_id=eq.${encodeURIComponent(targetId)}&select=category,scan_count,successful_prompts,failed_prompts,response_patterns&order=category&offset=${offset}&limit=500`,
+              { headers: { ...sbHeaders, Prefer: 'count=exact' } }
+            );
+            if (!existMemRes.ok) throw new Error('memory_history_unavailable');
+            const totalText = existMemRes.headers.get('content-range')?.split('/')[1];
+            const total = totalText && totalText !== '*' ? Number(totalText) : NaN;
+            const page = await existMemRes.json();
+            if (!Array.isArray(page) || !Number.isSafeInteger(total) || total < 0 || total > 10000
+              || (memoryTotal !== null && memoryTotal !== total)) throw new Error('memory_history_incomplete');
+            memoryTotal = total;
+            existingMemory.push(...page);
+            if (existingMemory.length === total) break;
+            if (existingMemory.length > total || page.length !== 500) throw new Error('memory_history_incomplete');
           }
+          if (new Set(existingMemory.map(row => row.category)).size !== existingMemory.length) throw new Error('memory_history_conflicting');
           const existingByCategory = {};
           for (const em of existingMemory) {
             existingByCategory[em.category] = em;
           }
 
           // Upsert each category
+          if (typeof report.id !== 'string' || !report.id) throw new Error('memory_source_unavailable');
+          let qualifiedMemoryWrites = 0;
           for (const [cat, data] of Object.entries(memCategoryMap)) {
             const existing = existingByCategory[cat];
+            // Never overwrite or launder unqualified historical memory.
+            if (existing && !isQualifiedMemory(existing)) continue;
             const prevScanCount = existing ? (existing.scan_count || 0) : 0;
             const newScanCount = prevScanCount + 1;
             const bypassRate = data.total > 0 ? data.allowed / data.total : 0;
@@ -2812,6 +2827,11 @@ const worker = {
             const flagRate = data.total > 0 ? data.flagged / data.total : 0;
             const blockRate = data.total > 0 ? data.blocked / data.total : 0;
             const responsePatterns = {
+              qualification: {
+                version: MEMORY_QUALIFICATION_VERSION, state: 'QUALIFIED',
+                qualified_outcomes: data.total,
+                source_report_ids: [...new Set([...(existing?.response_patterns?.qualification?.source_report_ids || []), report.id])],
+              },
               hesitation_rate: parseFloat(flagRate.toFixed(3)),
               partial_bypass_rate: parseFloat(flagRate.toFixed(3)),
               refusal_classes: blockRate > 0.8 ? ['safety-policy'] : [],
@@ -2840,7 +2860,7 @@ const worker = {
               updated_at: new Date().toISOString(),
             };
 
-            await fetch(`${SB_URL}/rest/v1/target_memory`, {
+            const memoryWrite = await fetch(`${SB_URL}/rest/v1/target_memory`, {
               method: "POST",
               headers: {
                 ...sbHeaders,
@@ -2848,8 +2868,10 @@ const worker = {
               },
               body: JSON.stringify(row),
             });
+            if (!memoryWrite.ok) throw new Error('qualified_memory_write_failed');
+            qualifiedMemoryWrites++;
           }
-          console.log(`[swarm-memory] Post-scan upsert: ${Object.keys(memCategoryMap).length} categories updated for target ${targetId}`);
+          console.log(`[swarm-memory] Qualified categories updated: ${qualifiedMemoryWrites}`);
         } catch (memErr) {
           // Non-fatal — scan succeeded even if memory update fails
           console.log(`[swarm-memory] Post-scan upsert failed (non-fatal): ${memErr}`);
