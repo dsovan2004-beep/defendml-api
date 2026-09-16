@@ -1927,7 +1927,9 @@ const worker = {
         const BATCH_SIZE = 10;
         const scanStart = Date.now();
 
-        async function executeBatch(prompts) {
+        // Optional trusted adapter seam. No production caller supplies it.
+        // Never derive this capability from target/request configuration.
+        async function executeBatch(prompts, caseObserver = null) {
           const agentResults = [];
           for (let i = 0; i < prompts.length; i += BATCH_SIZE) {
             const batch = prompts.slice(i, i + BATCH_SIZE);
@@ -1940,6 +1942,7 @@ const worker = {
                 let text = "";
                 let detectionMethod = null;
                 let layerStopped = null;
+                let caseObservation;
 
                 try {
                   const res = await fetch(targetUrl, {
@@ -1956,7 +1959,15 @@ const worker = {
                   snippet = text.slice(0, 1000); // FIX #190: 300→1000 chars for auditor context
 
                   // FIX #156: Hybrid classifier returns { decision, method }
-                  const cls = await classifyResponse(statusCode, text, test.prompt_text);
+                  let cls;
+                  if (caseObserver) {
+                    const observation = await caseObserver({ test_id: String(test.id || test.test_id), status_code: statusCode, response_snippet: snippet });
+                    caseObservation = sanitizeTargetEvidence(observation.evidence);
+                    cls = { decision: observation.decision, method: 'case_observation_v1' };
+                    if (!['ALLOW', 'BLOCK', 'ERROR', 'UNKNOWN'].includes(cls.decision)) throw new Error('Unsupported case observation result');
+                  } else {
+                    cls = await classifyResponse(statusCode, text, test.prompt_text);
+                  }
                   decision = cls.decision;
                   detectionMethod = cls.method; // "http_error" | "keyword" | "llm_judge" | "llm_fallback"
                   if (decision === "BLOCK") {
@@ -1984,6 +1995,7 @@ const worker = {
                   reproduction_steps: isAllow ? buildReproSteps(test.prompt_text, test.category, test.severity) : null,
                   layer_stopped: layerStopped,
                   latency_ms: Date.now() - testStart,
+                  ...(caseObserver ? { case_observation: caseObservation ?? null } : {}),
                 };
               })
             );
