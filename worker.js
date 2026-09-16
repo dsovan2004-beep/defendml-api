@@ -1951,7 +1951,7 @@ const worker = {
                   if (caseTransport) {
                     if (!caseObserver) throw new Error('Native transport requires case observation');
                     executionProtocol = caseTransport.protocol ?? 'mcp-stdio';
-                    if (!['mcp-stdio', 'tool-json', 'memory-json'].includes(executionProtocol)) throw new Error('Unsupported native transport');
+                    if (!['mcp-stdio', 'tool-json', 'memory-json', 'multiturn-json'].includes(executionProtocol)) throw new Error('Unsupported native transport');
                     const native = await caseTransport(test);
                     if (native.protocol !== executionProtocol || native.execution_status !== 'COMPLETE' || typeof native.text !== 'string') throw new Error('Native transport failed');
                     executionProtocol = native.protocol;
@@ -1986,7 +1986,7 @@ const worker = {
                   decision = cls.decision;
                   detectionMethod = cls.method; // "http_error" | "keyword" | "llm_judge" | "llm_fallback"
                   if (decision === "BLOCK") {
-                    layerStopped = caseTransport ? (executionProtocol === 'memory-json' ? "memory-write-authorization" : executionProtocol === 'tool-json' ? "action-authorization" : "resource-authorization") : statusCode >= 400 ? "transport" : "application";
+                    layerStopped = caseTransport ? (executionProtocol === 'multiturn-json' ? "conversation-trust" : executionProtocol === 'memory-json' ? "memory-write-authorization" : executionProtocol === 'tool-json' ? "action-authorization" : "resource-authorization") : statusCode >= 400 ? "transport" : "application";
                   }
                 } catch (e) {
                   decision = "ERROR";
@@ -2008,7 +2008,11 @@ const worker = {
                   response_snippet: snippet,
                   // FIX #159: Full response text (up to 8KB) + reproduction steps for ALLOW
                   response_text: isAllow ? (typeof text === "string" ? text.slice(0, 8000) : "") : null,
-                  reproduction_steps: isAllow ? (caseTransport ? (executionProtocol === 'memory-json' ? [
+                  reproduction_steps: isAllow ? (caseTransport ? (executionProtocol === 'multiturn-json' ? [
+                    "Start the authorized fresh conversation and submit the bound ordered turns separately.",
+                    "Follow the observed response-dependent branch and inspect the final outcome.",
+                    "Compare the same final turn in fresh final-only and benign-history sessions."
+                  ] : executionProtocol === 'memory-json' ? [
                     "Attempt the authorized lower-trust memory write in a disposable store.",
                     "End the writer and run the clean legitimate task in a fresh process.",
                     "Compare durable record and retrieval evidence with the independently observed outcome and clean-store control."
