@@ -1944,14 +1944,18 @@ const worker = {
                 let layerStopped = null;
                 let caseObservation;
                 let executionStatus;
+                let executionProtocol;
 
                 try {
                   let rawText;
                   if (caseTransport) {
                     if (!caseObserver) throw new Error('Native transport requires case observation');
+                    executionProtocol = caseTransport.protocol ?? 'mcp-stdio';
+                    if (!['mcp-stdio', 'tool-json'].includes(executionProtocol)) throw new Error('Unsupported native transport');
                     const native = await caseTransport(test);
-                    if (native.protocol !== 'mcp-stdio' || native.execution_status !== 'COMPLETE' || typeof native.text !== 'string') throw new Error('Native transport failed');
-                    statusCode = null; // Native MCP is not an HTTP response.
+                    if (native.protocol !== executionProtocol || native.execution_status !== 'COMPLETE' || typeof native.text !== 'string') throw new Error('Native transport failed');
+                    executionProtocol = native.protocol;
+                    statusCode = null; // Native execution is not an HTTP response.
                     executionStatus = 'COMPLETE';
                     rawText = native.text;
                   } else {
@@ -1972,7 +1976,7 @@ const worker = {
                   let cls;
                   if (caseObserver) {
                     const observation = await caseObserver({ test_id: String(test.id || test.test_id), status_code: statusCode, response_snippet: snippet,
-                      ...(caseTransport ? { execution_protocol: 'mcp-stdio', execution_status: executionStatus } : {}) });
+                      ...(caseTransport ? { execution_protocol: executionProtocol, execution_status: executionStatus } : {}) });
                     caseObservation = sanitizeTargetEvidence(observation.evidence);
                     cls = { decision: observation.decision, method: 'case_observation_v1' };
                     if (!['ALLOW', 'BLOCK', 'ERROR', 'UNKNOWN'].includes(cls.decision)) throw new Error('Unsupported case observation result');
@@ -1982,7 +1986,7 @@ const worker = {
                   decision = cls.decision;
                   detectionMethod = cls.method; // "http_error" | "keyword" | "llm_judge" | "llm_fallback"
                   if (decision === "BLOCK") {
-                    layerStopped = caseTransport ? "resource-authorization" : statusCode >= 400 ? "transport" : "application";
+                    layerStopped = caseTransport ? (executionProtocol === 'tool-json' ? "action-authorization" : "resource-authorization") : statusCode >= 400 ? "transport" : "application";
                   }
                 } catch (e) {
                   decision = "ERROR";
@@ -2004,15 +2008,19 @@ const worker = {
                   response_snippet: snippet,
                   // FIX #159: Full response text (up to 8KB) + reproduction steps for ALLOW
                   response_text: isAllow ? (typeof text === "string" ? text.slice(0, 8000) : "") : null,
-                  reproduction_steps: isAllow ? (caseTransport ? [
+                  reproduction_steps: isAllow ? (caseTransport ? (executionProtocol === 'tool-json' ? [
+                    "Confirm the authorized local action scope and successful permitted delivery.",
+                    "Repeat the destination-bound action request recorded in the case observation.",
+                    "Compare independent receiver state before and after the complete execution window."
+                  ] : [
                     "Initialize the authorized MCP stdio session and confirm legitimate resource access.",
                     "Repeat resources/read for the out-of-scope resource bound in the case observation.",
                     "Compare independent resource-access evidence and sanitized disclosure against the same request and session."
-                  ] : buildReproSteps(test.prompt_text, test.category, test.severity)) : null,
+                  ]) : buildReproSteps(test.prompt_text, test.category, test.severity)) : null,
                   layer_stopped: layerStopped,
                   latency_ms: Date.now() - testStart,
                   ...(caseObserver ? { case_observation: caseObservation ?? null } : {}),
-                  ...(caseTransport ? { execution_protocol: 'mcp-stdio', execution_status: executionStatus } : {}),
+                  ...(caseTransport ? { execution_protocol: executionProtocol ?? null, execution_status: executionStatus } : {}),
                 };
               })
             );
