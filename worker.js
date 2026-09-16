@@ -1929,7 +1929,7 @@ const worker = {
 
         // Optional trusted adapter seam. No production caller supplies it.
         // Never derive this capability from target/request configuration.
-        async function executeBatch(prompts, caseObserver = null) {
+        async function executeBatch(prompts, caseObserver = null, caseTransport = null) {
           const agentResults = [];
           for (let i = 0; i < prompts.length; i += BATCH_SIZE) {
             const batch = prompts.slice(i, i + BATCH_SIZE);
@@ -1943,17 +1943,27 @@ const worker = {
                 let detectionMethod = null;
                 let layerStopped = null;
                 let caseObservation;
+                let executionStatus;
 
                 try {
-                  const res = await fetch(targetUrl, {
-                    method: "POST",
-                    headers: targetHeaders,
-                    body: buildRequestBody(test.prompt_text), // FIX #157: format-aware body
-                    signal: AbortSignal.timeout(8000),
-                  });
-
-                  statusCode = res.status;
-                  let rawText = await res.text().catch(() => "");
+                  let rawText;
+                  if (caseTransport) {
+                    if (!caseObserver) throw new Error('Native transport requires case observation');
+                    const native = await caseTransport(test);
+                    if (native.protocol !== 'mcp-stdio' || native.execution_status !== 'COMPLETE' || typeof native.text !== 'string') throw new Error('Native transport failed');
+                    statusCode = null; // Native MCP is not an HTTP response.
+                    executionStatus = 'COMPLETE';
+                    rawText = native.text;
+                  } else {
+                    const res = await fetch(targetUrl, {
+                      method: "POST",
+                      headers: targetHeaders,
+                      body: buildRequestBody(test.prompt_text), // FIX #157: format-aware body
+                      signal: AbortSignal.timeout(8000),
+                    });
+                    statusCode = res.status;
+                    rawText = await res.text().catch(() => "");
+                  }
                   text = sanitizeTargetEvidence(extractResponseText(rawText)); // redact before classification or persistence
                   rawText = "";
                   snippet = text.slice(0, 1000); // FIX #190: 300→1000 chars for auditor context
@@ -1961,7 +1971,8 @@ const worker = {
                   // FIX #156: Hybrid classifier returns { decision, method }
                   let cls;
                   if (caseObserver) {
-                    const observation = await caseObserver({ test_id: String(test.id || test.test_id), status_code: statusCode, response_snippet: snippet });
+                    const observation = await caseObserver({ test_id: String(test.id || test.test_id), status_code: statusCode, response_snippet: snippet,
+                      ...(caseTransport ? { execution_protocol: 'mcp-stdio', execution_status: executionStatus } : {}) });
                     caseObservation = sanitizeTargetEvidence(observation.evidence);
                     cls = { decision: observation.decision, method: 'case_observation_v1' };
                     if (!['ALLOW', 'BLOCK', 'ERROR', 'UNKNOWN'].includes(cls.decision)) throw new Error('Unsupported case observation result');
@@ -1971,12 +1982,13 @@ const worker = {
                   decision = cls.decision;
                   detectionMethod = cls.method; // "http_error" | "keyword" | "llm_judge" | "llm_fallback"
                   if (decision === "BLOCK") {
-                    layerStopped = statusCode >= 400 ? "transport" : "application";
+                    layerStopped = caseTransport ? "resource-authorization" : statusCode >= 400 ? "transport" : "application";
                   }
                 } catch (e) {
                   decision = "ERROR";
                   snippet = sanitizeTargetError(e).slice(0, 200);
                   statusCode = 0;
+                  if (caseTransport) { statusCode = null; executionStatus = 'FAILED'; }
                 }
 
                 // FIX #159: For ALLOW decisions, capture full response + repro steps
@@ -1992,10 +2004,15 @@ const worker = {
                   response_snippet: snippet,
                   // FIX #159: Full response text (up to 8KB) + reproduction steps for ALLOW
                   response_text: isAllow ? (typeof text === "string" ? text.slice(0, 8000) : "") : null,
-                  reproduction_steps: isAllow ? buildReproSteps(test.prompt_text, test.category, test.severity) : null,
+                  reproduction_steps: isAllow ? (caseTransport ? [
+                    "Initialize the authorized MCP stdio session and confirm legitimate resource access.",
+                    "Repeat resources/read for the out-of-scope resource bound in the case observation.",
+                    "Compare independent resource-access evidence and sanitized disclosure against the same request and session."
+                  ] : buildReproSteps(test.prompt_text, test.category, test.severity)) : null,
                   layer_stopped: layerStopped,
                   latency_ms: Date.now() - testStart,
                   ...(caseObserver ? { case_observation: caseObservation ?? null } : {}),
+                  ...(caseTransport ? { execution_protocol: 'mcp-stdio', execution_status: executionStatus } : {}),
                 };
               })
             );
