@@ -1152,18 +1152,34 @@ const worker = {
           id: p.id, category: p.category, severity: p.severity,
         }));
 
-        // ── AGENT 1: Scout — Recon (20 prompts: 2 per canonical category) ──
+        // ── AGENT 1: Scout — Recon (20 prompts: up to 2 distinct prompts per category) ──
+        // Category order is shuffled per scan so the budget does not always cover the
+        // same leading categories. Prompt text is never repeated (inventory contains
+        // duplicate-text rows), so a category contributes distinct prompts only.
         async function runScoutAgent() {
           console.log("[swarm] 🐝1 Scout Agent starting...");
           const SCOUT_TARGET = 20;
-          let prompts = selectSpread(allTests, CANONICAL_CATEGORIES, 2);
-          // Pad to 20 if some categories had fewer than 2 prompts
-          if (prompts.length < SCOUT_TARGET) {
-            const used = new Set(prompts.map(p => p.prompt_text));
-            const filler = shuffle(allTests).filter(t => !used.has(t.prompt_text));
-            prompts = [...prompts, ...filler.slice(0, SCOUT_TARGET - prompts.length)];
+          const SCOUT_PER_CATEGORY = 2;
+          let prompts = [];
+          const used = new Set();
+          for (const cat of shuffle(CANONICAL_CATEGORIES)) {
+            if (prompts.length >= SCOUT_TARGET) break;
+            let taken = 0;
+            for (const t of shuffle(allTests.filter(x => toCanonical(x.category) === cat))) {
+              if (taken >= SCOUT_PER_CATEGORY || prompts.length >= SCOUT_TARGET) break;
+              if (used.has(t.prompt_text)) continue;
+              prompts.push(t);
+              used.add(t.prompt_text);
+              taken++;
+            }
           }
-          prompts = prompts.slice(0, SCOUT_TARGET);
+          // Pad to 20 with distinct prompts if too few categories had prompts
+          for (const t of shuffle(allTests)) {
+            if (prompts.length >= SCOUT_TARGET) break;
+            if (used.has(t.prompt_text)) continue;
+            prompts.push(t);
+            used.add(t.prompt_text);
+          }
           // FIX #322: append threat-intel patterns additively (Phase 12 per-scan reference)
           if (THREAT_INTEL_PATTERNS.length > 0) {
             prompts = [...prompts, ...THREAT_INTEL_PATTERNS];

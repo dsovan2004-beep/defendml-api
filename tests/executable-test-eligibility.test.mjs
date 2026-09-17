@@ -98,7 +98,7 @@ function loadSelectors(seed) {
     Math: Object.assign(Object.create(Math), { random: seeded(seed) }),
   });
 }
-// Mirrors the agents' spread + filler expressions (e.g. Scout): shuffle(allTests).filter(t => !used.has(t.prompt_text)).
+// Mirrors the agents' spread + filler expressions (e.g. Probe): shuffle(allTests).filter(t => !used.has(t.prompt_text)).
 function spreadThenFiller(s, pool, target) {
   let prompts = s.selectSpread(pool, s.CANONICAL_CATEGORIES, 2);
   const used = new Set(prompts.map((p) => p.prompt_text));
