@@ -145,7 +145,7 @@ test('degraded supplemental fetch still leaves empty pools', async () => {
   assert.deepEqual(await loadSupplement(async () => { throw Error('synthetic'); }), { mcp: [], asi: [] });
 });
 
-const executeBatchSource = between('async function executeBatch(prompts) {', '// ── Fix #256-full (2026-04-27)');
+const executeBatchSource = between('async function executeBatch(prompts', '// ── Fix #256-full (2026-04-27)');
 async function runBatch(prompts) {
   const sent = [];
   const executeBatch = vm.runInNewContext(`(${executeBatchSource.trim()})`, {
@@ -171,4 +171,39 @@ test('HTTP adapter never submits or counts non-executable prompts from any sourc
 
 test('placeholder-only batch sends nothing', async () => {
   assert.deepEqual(await runBatch(placeholders), { sent: [], testIds: [] });
+});
+
+// The optional adapter seam must stay inert: a transport without an independent
+// observer cannot execute, and the failure must never resolve as prevention.
+async function runSeam(prompts, caseObserver, caseTransport) {
+  const sent = [];
+  const executeBatch = vm.runInNewContext(`(${executeBatchSource.trim()})`, {
+    BATCH_SIZE: 3, targetUrl: 'https://target.invalid/synthetic', targetHeaders: {}, report: { id: 'synthetic-report' },
+    buildRequestBody: (text) => JSON.stringify({ message: text }),
+    fetch: async (_url, init) => { sent.push(JSON.parse(init.body).message); return { status: 200, text: async () => 'synthetic refusal' }; },
+    AbortSignal: { timeout: () => undefined }, extractResponseText: (t) => t, sanitizeTargetEvidence: (t) => t,
+    sanitizeTargetError: (e) => String(e), classifyResponse: async () => ({ decision: 'BLOCK', method: 'keyword' }),
+    buildReproSteps: () => [], isExecutableTest,
+  });
+  return { sent, results: await executeBatch(prompts, caseObserver, caseTransport) };
+}
+
+test('transport without an independent observer fails closed and never reports prevention', async () => {
+  const transport = Object.assign(async () => ({ protocol: 'mcp-stdio', execution_status: 'COMPLETE', text: 'disclosed' }), { protocol: 'mcp-stdio' });
+  const { sent, results } = await runSeam([synthetic(1)], null, transport);
+  assert.deepEqual(sent, []); // no HTTP fallback smuggling the prompt out
+  assert.equal(results.length, 1);
+  assert.equal(results[0].decision, 'ERROR');
+  assert.notEqual(results[0].decision, 'BLOCK');
+  assert.equal(results[0].execution_status, 'FAILED');
+  assert.equal(results[0].status_code, null);
+});
+
+test('unsupported transport protocol cannot execute', async () => {
+  const observer = async () => ({ decision: 'ALLOW', evidence: {} });
+  const transport = Object.assign(async () => ({ protocol: 'http-smuggled', execution_status: 'COMPLETE', text: 'x' }), { protocol: 'http-smuggled' });
+  const { sent, results } = await runSeam([synthetic(1)], observer, transport);
+  assert.deepEqual(sent, []);
+  assert.equal(results[0].decision, 'ERROR');
+  assert.equal(results[0].execution_status, 'FAILED');
 });

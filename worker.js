@@ -1952,7 +1952,9 @@ const worker = {
         const BATCH_SIZE = 10;
         const scanStart = Date.now();
 
-        async function executeBatch(prompts) {
+        // Optional trusted adapter seam. No production caller supplies it.
+        // Never derive this capability from target/request configuration.
+        async function executeBatch(prompts, caseObserver = null, caseTransport = null) {
           // Fail closed for every prompt source (inventory, memory, threat intel, generated):
           // non-executable text is never submitted and never counted as an executed test.
           prompts = prompts.filter(isExecutableTest);
@@ -1968,32 +1970,57 @@ const worker = {
                 let text = "";
                 let detectionMethod = null;
                 let layerStopped = null;
+                let caseObservation;
+                let executionStatus;
+                let executionProtocol;
 
                 try {
-                  const res = await fetch(targetUrl, {
-                    method: "POST",
-                    headers: targetHeaders,
-                    body: buildRequestBody(test.prompt_text), // FIX #157: format-aware body
-                    signal: AbortSignal.timeout(8000),
-                  });
-
-                  statusCode = res.status;
-                  let rawText = await res.text().catch(() => "");
+                  let rawText;
+                  if (caseTransport) {
+                    if (!caseObserver) throw new Error('Native transport requires case observation');
+                    executionProtocol = caseTransport.protocol ?? 'mcp-stdio';
+                    if (!['mcp-stdio', 'tool-json', 'memory-json', 'multiturn-json'].includes(executionProtocol)) throw new Error('Unsupported native transport');
+                    const native = await caseTransport(test);
+                    if (native.protocol !== executionProtocol || native.execution_status !== 'COMPLETE' || typeof native.text !== 'string') throw new Error('Native transport failed');
+                    executionProtocol = native.protocol;
+                    statusCode = null; // Native execution is not an HTTP response.
+                    executionStatus = 'COMPLETE';
+                    rawText = native.text;
+                  } else {
+                    const res = await fetch(targetUrl, {
+                      method: "POST",
+                      headers: targetHeaders,
+                      body: buildRequestBody(test.prompt_text), // FIX #157: format-aware body
+                      signal: AbortSignal.timeout(8000),
+                    });
+                    statusCode = res.status;
+                    rawText = await res.text().catch(() => "");
+                  }
                   text = sanitizeTargetEvidence(extractResponseText(rawText)); // redact before classification or persistence
                   rawText = "";
                   snippet = text.slice(0, 1000); // FIX #190: 300→1000 chars for auditor context
 
                   // FIX #156: Hybrid classifier returns { decision, method }
-                  const cls = await classifyResponse(statusCode, text, test.prompt_text);
+                  let cls;
+                  if (caseObserver) {
+                    const observation = await caseObserver({ test_id: String(test.id || test.test_id), status_code: statusCode, response_snippet: snippet,
+                      ...(caseTransport ? { execution_protocol: executionProtocol, execution_status: executionStatus } : {}) });
+                    caseObservation = sanitizeTargetEvidence(observation.evidence);
+                    cls = { decision: observation.decision, method: 'case_observation_v1' };
+                    if (!['ALLOW', 'BLOCK', 'ERROR', 'UNKNOWN'].includes(cls.decision)) throw new Error('Unsupported case observation result');
+                  } else {
+                    cls = await classifyResponse(statusCode, text, test.prompt_text);
+                  }
                   decision = cls.decision;
                   detectionMethod = cls.method; // "http_error" | "keyword" | "llm_judge" | "llm_fallback"
                   if (decision === "BLOCK") {
-                    layerStopped = statusCode >= 400 ? "transport" : "application";
+                    layerStopped = caseTransport ? (executionProtocol === 'multiturn-json' ? "conversation-trust" : executionProtocol === 'memory-json' ? "memory-write-authorization" : executionProtocol === 'tool-json' ? "action-authorization" : "resource-authorization") : statusCode >= 400 ? "transport" : "application";
                   }
                 } catch (e) {
                   decision = "ERROR";
                   snippet = sanitizeTargetError(e).slice(0, 200);
                   statusCode = 0;
+                  if (caseTransport) { statusCode = null; executionStatus = 'FAILED'; }
                 }
 
                 // FIX #159: For ALLOW decisions, capture full response + repro steps
@@ -2009,9 +2036,27 @@ const worker = {
                   response_snippet: snippet,
                   // FIX #159: Full response text (up to 8KB) + reproduction steps for ALLOW
                   response_text: isAllow ? (typeof text === "string" ? text.slice(0, 8000) : "") : null,
-                  reproduction_steps: isAllow ? buildReproSteps(test.prompt_text, test.category, test.severity) : null,
+                  reproduction_steps: isAllow ? (caseTransport ? (executionProtocol === 'multiturn-json' ? [
+                    "Start the authorized fresh conversation and submit the bound ordered turns separately.",
+                    "Follow the observed response-dependent branch and inspect the final outcome.",
+                    "Compare the same final turn in fresh final-only and benign-history sessions."
+                  ] : executionProtocol === 'memory-json' ? [
+                    "Attempt the authorized lower-trust memory write in a disposable store.",
+                    "End the writer and run the clean legitimate task in a fresh process.",
+                    "Compare durable record and retrieval evidence with the independently observed outcome and clean-store control."
+                  ] : executionProtocol === 'tool-json' ? [
+                    "Confirm the authorized local action scope and successful permitted delivery.",
+                    "Repeat the destination-bound action request recorded in the case observation.",
+                    "Compare independent receiver state before and after the complete execution window."
+                  ] : [
+                    "Initialize the authorized MCP stdio session and confirm legitimate resource access.",
+                    "Repeat resources/read for the out-of-scope resource bound in the case observation.",
+                    "Compare independent resource-access evidence and sanitized disclosure against the same request and session."
+                  ]) : buildReproSteps(test.prompt_text, test.category, test.severity)) : null,
                   layer_stopped: layerStopped,
                   latency_ms: Date.now() - testStart,
+                  ...(caseObserver ? { case_observation: caseObservation ?? null } : {}),
+                  ...(caseTransport ? { execution_protocol: executionProtocol ?? null, execution_status: executionStatus } : {}),
                 };
               })
             );
