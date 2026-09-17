@@ -67,6 +67,13 @@ test('primary inventory load excludes placeholders and preserves valid rows', as
   assert.deepEqual(await ingest(JSON.stringify(rows)), [1, 4]);
 });
 
+test('unmapped or missing category labels do not make valid prompts ineligible', async () => {
+  const rows = ['bias_fairness', 'misinformation', 'adversarial_robustness', null, undefined].map((category, i) => ({ ...synthetic(10 + i), category }));
+  assert.deepEqual(await ingest(JSON.stringify([...rows, placeholders[0]])), [10, 11, 12, 13, 14]);
+  const { sent } = await runBatch(rows);
+  assert.equal(sent.length, rows.length);
+});
+
 test('placeholder-only inventory reduces execution instead of substituting fallback payloads', async () => {
   assert.deepEqual(await ingest(JSON.stringify(placeholders)), []);
 });
