@@ -1,4 +1,5 @@
 import { isQualifiedMemory, qualifiesMemoryOutcome, MEMORY_QUALIFICATION_VERSION } from './memory-qualification.mjs';
+import { isExecutableTest } from './executable-test-eligibility.mjs';
 export const TARGET_SECRET_REDACTION_MARKER = "[REDACTED_TARGET_SECRET]";
 export const TARGET_SECRET_MIN_LENGTH = 8;
 
@@ -959,6 +960,14 @@ const worker = {
           console.log(`[red-team] DB empty — using BUILTIN_TESTS`);
           allTests = BUILTIN_TESTS;
         }
+        // Exclude metadata-only placeholders and blank prompts from every selection path.
+        // Filtered after the fallback decision: a placeholder-only response reduces actual
+        // execution rather than silently substituting BUILTIN_TESTS payloads.
+        const inventoryRowCount = allTests.length;
+        allTests = allTests.filter(isExecutableTest);
+        if (allTests.length < inventoryRowCount) {
+          console.log(`[red-team] Excluded ${inventoryRowCount - allTests.length} non-executable inventory rows from selection`);
+        }
 
         // Fetch SwarmMemory for this target
         let swarmMemory = [];
@@ -1077,7 +1086,7 @@ const worker = {
               category: r.category,
               severity: r.severity,
               prompt_text: r.prompt_text,
-            }));
+            })).filter(isExecutableTest);
             MCP_ATTACKS = normalized.filter(r => r.category === 'MCP Attack');
             ASI_EXTENDED_PROMPTS = normalized.filter(r => r.category !== 'MCP Attack');
             console.log(`[fix-318] Loaded ${MCP_ATTACKS.length} MCP + ${ASI_EXTENDED_PROMPTS.length} ASI03-10 prompts from DB`);
@@ -1928,6 +1937,9 @@ const worker = {
         const scanStart = Date.now();
 
         async function executeBatch(prompts) {
+          // Fail closed for every prompt source (inventory, memory, threat intel, generated):
+          // non-executable text is never submitted and never counted as an executed test.
+          prompts = prompts.filter(isExecutableTest);
           const agentResults = [];
           for (let i = 0; i < prompts.length; i += BATCH_SIZE) {
             const batch = prompts.slice(i, i + BATCH_SIZE);
