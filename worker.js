@@ -31,6 +31,9 @@ export function buildTargetSensitiveValues(target) {
   const values = new Set();
   addSensitiveValue(values, target?.auth_token);
   addSensitiveValue(values, target?.api_key);
+  // The protected marker is the value a disclosure test hunts for. Disclosure is
+  // observed before redaction; the marker itself must never reach persistence.
+  addSensitiveValue(values, target?.protected_marker);
   if (target?.custom_headers && typeof target.custom_headers === "object") {
     for (const value of Object.values(target.custom_headers)) addSensitiveValue(values, value);
   }

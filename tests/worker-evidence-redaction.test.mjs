@@ -130,3 +130,36 @@ test("17 timeout cannot bypass worker persistence redaction", () => {
   assert.equal(persistedBeforeProxyResponse.response_text, TARGET_SECRET_REDACTION_MARKER);
   assert.equal(persistedBeforeProxyResponse.proxy_status, 502);
 });
+
+// Phase 1, AI Application. The protected marker is a customer canary placed in
+// the tested AI's context. Disclosure must be observed BEFORE redaction, but the
+// marker must never survive into persisted evidence.
+test('protected marker is redacted from retained evidence', () => {
+  const marker = 'dml-canary-4f9c2ab7e1d64c0f';
+  const values = buildTargetSensitiveValues({ protected_marker: marker });
+  assert.ok(values.includes(marker), 'marker must be a sensitive value');
+  assert.equal(redactTargetSecrets(marker, values), TARGET_SECRET_REDACTION_MARKER);
+  assert.equal(
+    redactTargetSecrets(`The secret is ${marker}, do not share.`, values),
+    `The secret is ${TARGET_SECRET_REDACTION_MARKER}, do not share.`,
+  );
+});
+
+test('protected marker is redacted inside nested persisted structures', () => {
+  const marker = 'dml-canary-aa11bb22cc33dd44';
+  const values = buildTargetSensitiveValues({ protected_marker: marker });
+  const row = redactTargetSecrets(
+    { response_snippet: `leaked ${marker}`, response_text: marker, reproduction_steps: [`step ${marker}`], nested: { deep: marker } },
+    values,
+  );
+  assert.equal(JSON.stringify(row).includes(marker), false, 'no persisted field may contain the marker');
+});
+
+test('a short or blank protected marker is not treated as a secret', () => {
+  // Mirrors the existing minimum-length safety rule: redacting a 3-character
+  // value would corrupt ordinary responses.
+  assert.equal(buildTargetSensitiveValues({ protected_marker: 'abc' }).length, 0);
+  assert.equal(buildTargetSensitiveValues({ protected_marker: '   ' }).length, 0);
+  assert.equal(buildTargetSensitiveValues({ protected_marker: null }).length, 0);
+  assert.equal(buildTargetSensitiveValues({}).length, 0);
+});
