@@ -288,6 +288,56 @@ const worker = {
       return withCORS(json({ message: reply }), request);
     }
 
+    // ── Controlled MCP validation fixture (Phase 2) ────────────────────────
+    // A minimal Streamable HTTP MCP server so DefendML can validate its own MCP
+    // execution + observation chain against a real controlled resource-scope
+    // boundary. Same discipline as the AI-application fixture: token-gated, inert
+    // when unconfigured, and it can only ever disclose the synthetic canary in
+    // VALIDATION_MARKER — never a real credential or customer data.
+    //
+    // Stateless JSON-RPC: each POST is one message. The `x-validation-mode`
+    // header picks the controlled boundary — "vulnerable" discloses the private
+    // resource (resource scope NOT enforced), anything else denies it with a
+    // JSON-RPC scope error. Both are the intended, controlled behaviours.
+    if (url.pathname === "/api/validation/mcp" && request.method === "POST") {
+      const expected = typeof env.VALIDATION_TOKEN === "string" ? env.VALIDATION_TOKEN : "";
+      const supplied = request.headers.get("x-validation-token") || "";
+      if (!expected || supplied !== expected) {
+        return withCORS(json({ error: "Not found" }, 404), request);
+      }
+      const marker = typeof env.VALIDATION_MARKER === "string" ? env.VALIDATION_MARKER : "";
+      const mode = request.headers.get("x-validation-mode") === "vulnerable" ? "vulnerable" : "controlled";
+      let msg;
+      try { msg = await request.json(); } catch { return withCORS(json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, 200), request); }
+      if (!msg || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
+        return withCORS(json({ jsonrpc: "2.0", id: msg && msg.id !== undefined ? msg.id : null, error: { code: -32600, message: "Invalid Request" } }, 200), request);
+      }
+      // Notifications carry no id and expect no body.
+      if (msg.id === undefined || msg.id === null) {
+        return withCORS(new Response(null, { status: 202 }), request);
+      }
+      const reply = (result) => withCORS(json({ jsonrpc: "2.0", id: msg.id, result }), request);
+      const fail = (code, message) => withCORS(json({ jsonrpc: "2.0", id: msg.id, error: { code, message } }, 200), request);
+      if (msg.method === "initialize") {
+        return reply({ protocolVersion: "2025-11-25", capabilities: { resources: {} }, serverInfo: { name: "defendml-validation-mcp", version: "1" } });
+      }
+      if (msg.method === "resources/list") {
+        return reply({ resources: [{ uri: "fixture://public", name: "Synthetic public resource", mimeType: "text/plain" }] });
+      }
+      if (msg.method === "resources/read") {
+        const uri = msg.params && msg.params.uri;
+        if (uri === "fixture://public") return reply({ contents: [{ uri, mimeType: "text/plain", text: "Public, in-scope content." }] });
+        if (uri === "fixture://private") {
+          // The out-of-scope resource. Controlled = server enforces scope and
+          // denies. Vulnerable = server fails to enforce and discloses the canary.
+          if (mode === "vulnerable" && marker) return reply({ contents: [{ uri, mimeType: "text/plain", text: `Restricted record: ${marker}` }] });
+          return fail(-32001, "Scope denied");
+        }
+        return fail(-32602, "Unknown resource");
+      }
+      return fail(-32601, "Method not found");
+    }
+
     // Fix #239 (2026-04-27): /api/version exposes a fingerprint of the deployed
     // worker so future automated parity audits can detect stale deployments
     // without source access. Returns Sprint 11 feature markers + the BUILD_SHA
