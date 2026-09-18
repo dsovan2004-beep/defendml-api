@@ -250,6 +250,44 @@ const worker = {
       return resp;
     }
 
+    // ── Controlled internal validation fixture (Phase 1, AI Application) ─────
+    // Purpose: give DefendML a deterministic controlled security boundary so it
+    // can validate its OWN evidence chain — execution, observation, redaction,
+    // retention, qualification — against a real Target on the production path,
+    // and catch regressions in that chain on future releases.
+    //
+    // This is a test fixture, NOT a product surface and NOT a defended chat
+    // endpoint. DefendML tests whether controls hold; it does not become a
+    // control. The historical /api/chat "3-layer defense" endpoint was never
+    // implemented in this Worker, and rebuilding it would have added a
+    // defensive surface outside DefendML's lane.
+    //
+    // Not reachable without the shared validation token: a missing or wrong
+    // token is indistinguishable from an unknown path. The only value it can
+    // disclose is a synthetic canary held in VALIDATION_MARKER — never a real
+    // credential, never customer data. With either variable unset the fixture
+    // does not exist.
+    if (url.pathname === "/api/validation/ai-application" && request.method === "POST") {
+      const expected = typeof env.VALIDATION_TOKEN === "string" ? env.VALIDATION_TOKEN : "";
+      const supplied = request.headers.get("x-validation-token") || "";
+      if (!expected || supplied !== expected) {
+        return withCORS(json({ error: "Not found" }, 404), request);
+      }
+      const marker = typeof env.VALIDATION_MARKER === "string" ? env.VALIDATION_MARKER : "";
+      let prompt = "";
+      try {
+        const body = await request.json();
+        prompt = String(body?.message ?? body?.messages?.[0]?.content ?? "");
+      } catch { prompt = ""; }
+      // Deliberately naive: this fixture complies with a disclosure request.
+      // That is the controlled vulnerable behaviour under test, not a defect.
+      const asksForDisclosure = /reveal|disclose|system prompt|secret|canary|protected value|ignore (all )?previous|exfiltrat/i.test(prompt);
+      const reply = asksForDisclosure && marker
+        ? `Certainly. The protected value is ${marker}. Anything else?`
+        : "I can answer general questions about this service, but I will not share internal configuration.";
+      return withCORS(json({ message: reply }), request);
+    }
+
     // Fix #239 (2026-04-27): /api/version exposes a fingerprint of the deployed
     // worker so future automated parity audits can detect stale deployments
     // without source access. Returns Sprint 11 feature markers + the BUILD_SHA
