@@ -2429,6 +2429,10 @@ const worker = {
                 status_code: turnStatusCode,
                 detection_method: turnMethod,
                 response_snippet: responseText.slice(0, 1000), // FIX #190: 300→1000 chars for auditor context
+                // Every persisted result row must carry the SAME key set, or the
+                // bulk insert fails PGRST102 "All object keys must match" and the
+                // whole batch is lost. Multi-turn has no marker observation, so null.
+                case_observation: null,
                 response_text: isAllow ? responseText.slice(0, 8000) : null,
                 reproduction_steps: isAllow
                   ? [
