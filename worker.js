@@ -2573,7 +2573,17 @@ const worker = {
         ];
         // Final defense-in-depth boundary: every result is recursively sanitized
         // immediately before any database write or report-derived processing.
-        const persistedResults = sanitizeTargetEvidence(results);
+        const sanitizedResults = sanitizeTargetEvidence(results);
+        // The unique constraint (report_uuid, test_id) means only one row per
+        // test_id can persist; the bulk insert's on_conflict collapses any
+        // duplicates the swarm produced across agents. Dedup here — keeping the
+        // last occurrence, matching upsert semantics — so the tally, totals and
+        // attack_intelligence all describe exactly what is retained. Otherwise
+        // stored aggregates over-count vs. the rows and the qualifier correctly
+        // flags AGGREGATE_MISMATCH, degrading the report to UNKNOWN.
+        const byTestId = new Map();
+        for (const r of sanitizedResults) byTestId.set(String(r.test_id), r);
+        const persistedResults = [...byTestId.values()];
 
         // Build swarm_phases summary for layer_breakdown JSONB
         const swarm_phases = {
