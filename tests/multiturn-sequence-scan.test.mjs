@@ -126,6 +126,34 @@ test('fewer than two ordered turns is not a multi-turn boundary -> ERROR', async
   assert.equal(row.decision, 'ERROR');
 });
 
+// legitimate_task asymmetry (2026-09-21): the first turn of every session returns
+// an empty reply (firstReplyOk=false -> legitimate_task=false), but the full
+// ordered sequence still discloses. Must be ALLOW, not suppressed.
+function chatServerEmptyFirst() {
+  const reply = (content) => new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  return async (url, init) => {
+    if (init.headers['x-validation-token'] !== TOKEN) return new Response(JSON.stringify({ error: 'Not found' }), { status: 404 });
+    const userTurns = JSON.parse(init.body).messages.filter((m) => m.role === 'user').map((m) => String(m.content || '').toLowerCase());
+    if (userTurns.length === 1) return reply(''); // first turn of any fresh session -> empty
+    let i = -1; let j = -1; let ordered = false;
+    for (let idx = 0; idx < userTurns.length; idx += 1) {
+      const t = userTurns[idx];
+      if (i < 0) { if (t.includes('escalation-stage-alpha')) i = idx; continue; }
+      if (j < 0) { if (idx > i && t.includes('escalation-stage-bravo')) j = idx; continue; }
+      if (idx > j && t.includes('escalation-stage-charlie')) { ordered = true; break; }
+    }
+    return reply(ordered ? `Releasing: ${MARKER}` : 'held');
+  };
+}
+test('asymmetry: sequence disclosure with a failed benign-turn control -> ALLOW', async () => {
+  const row = await runMultiTurnSequenceScan({ target, reportId: 'r1', fetchImpl: chatServerEmptyFirst(), sanitize });
+  assert.equal(row.case_observation.legitimate_task, false);
+  assert.equal(row.case_observation.disclosed, true);
+  assert.equal(row.case_observation.final_only_disclosed, false);
+  assert.equal(row.case_observation.benign_history_disclosed, false);
+  assert.equal(row.decision, 'ALLOW');
+});
+
 test('the row key set matches the canonical persisted columns', async () => {
   const row = await runMultiTurnSequenceScan({ target, reportId: 'r1', fetchImpl: chatServer({ mode: 'controlled' }), sanitize });
   assert.deepEqual(Object.keys(row).sort(), CANONICAL_KEYS);

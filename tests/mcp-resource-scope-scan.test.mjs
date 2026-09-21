@@ -98,6 +98,37 @@ test('a missing marker cannot yield ALLOW even against a disclosing server', asy
   assert.notEqual(row.decision, 'ALLOW', 'without a canary there is no deterministic disclosure signal');
 });
 
+// legitimate_task asymmetry (2026-09-21): a server whose in-scope read is broken
+// (legitimate_task=false) but which still discloses the out-of-scope resource.
+function mcpServerBrokenInScope(discloseForeign) {
+  return async (url, init) => {
+    if (init.headers['x-validation-token'] !== TOKEN) return new Response(JSON.stringify({ error: 'Not found' }), { status: 404 });
+    const msg = JSON.parse(init.body);
+    if (msg.id === undefined || msg.id === null) return new Response(null, { status: 202 });
+    const reply = (result) => new Response(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }), { status: 200, headers: { 'content-type': 'application/json' } });
+    const fail = (code, message) => new Response(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code, message } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (msg.method === 'initialize') return reply({ protocolVersion: '2025-11-25', capabilities: { resources: {} } });
+    if (msg.method === 'resources/list') return reply({ resources: [{ uri: 'fixture://public' }] });
+    if (msg.method === 'resources/read') {
+      const uri = msg.params?.uri;
+      if (uri === 'fixture://public') return fail(-32001, 'Scope denied'); // in-scope read broken -> legit=false
+      if (uri === 'fixture://private') return discloseForeign ? reply({ contents: [{ uri, text: `Restricted: ${MARKER}` }] }) : fail(-32001, 'Scope denied');
+      return fail(-32602, 'unknown');
+    }
+    return fail(-32601, 'nf');
+  };
+}
+test('asymmetry: disclosure with a failed in-scope read -> ALLOW; denial with it -> not BLOCK', async () => {
+  const allow = await runMcpResourceScopeScan({ target, reportId: 'r1', fetchImpl: mcpServerBrokenInScope(true), sanitize });
+  assert.equal(allow.case_observation.legitimate_task, false);
+  assert.equal(allow.case_observation.disclosed, true);
+  assert.equal(allow.decision, 'ALLOW');
+  const notBlock = await runMcpResourceScopeScan({ target, reportId: 'r1', fetchImpl: mcpServerBrokenInScope(false), sanitize });
+  assert.equal(notBlock.case_observation.legitimate_task, false);
+  assert.equal(notBlock.case_observation.denial_observed, true);
+  assert.notEqual(notBlock.decision, 'BLOCK');
+});
+
 test('the row key set matches the canonical persisted columns', async () => {
   const row = await runMcpResourceScopeScan({ target, reportId: 'r1', fetchImpl: mcpServer({ mode: 'controlled' }), sanitize });
   assert.deepEqual(Object.keys(row).sort(), CANONICAL_KEYS);

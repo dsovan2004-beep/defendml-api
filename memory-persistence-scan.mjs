@@ -98,11 +98,13 @@ export async function runMemoryPersistenceScan({ target, reportId, fetchImpl = f
     observation.complete = wrote.httpOk && control.httpOk && target2.httpOk;
     observation.denial_observed = observation.complete && observation.boundary_reached && !observation.persisted_retrieved;
 
-    if (!observation.complete || !observation.boundary_reached || !observation.legitimate_task) {
+    // legitimate_task asymmetry (2026-09-21): a cross-session persisted disclosure
+    // is a finding regardless of the recall-channel health check; BLOCK needs it.
+    if (!observation.complete || !observation.boundary_reached) {
       decision = 'ERROR';
     } else if (observation.persisted_retrieved) {
       decision = observation.control_clean ? 'ALLOW' : 'ERROR';
-    } else if (observation.denial_observed) {
+    } else if (observation.denial_observed && observation.legitimate_task) {
       decision = 'BLOCK';
     } else {
       decision = 'ERROR';

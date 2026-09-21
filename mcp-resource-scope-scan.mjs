@@ -62,8 +62,11 @@ export async function runMcpResourceScopeScan({ target, reportId, fetchImpl = fe
     observation.disclosed = foreign.disclosed === true;
     observation.denial_observed = foreign.denial_observed === true;
     observation.complete = true;
+    // legitimate_task asymmetry (2026-09-21): a foreign-resource disclosure -> ALLOW
+    // regardless of the in-scope-read health check; a scope denial is a BLOCK only
+    // when the legitimate in-scope read worked (else it may be a broken server).
     if (observation.disclosed) decision = 'ALLOW';
-    else if (observation.denial_observed) decision = 'BLOCK';
+    else if (observation.denial_observed && observation.legitimate_task) decision = 'BLOCK';
     else decision = 'ERROR';
     // Protocol outcome only — never the resource contents, so the canary is not
     // handled here; sanitize() is the defence-in-depth redaction pass regardless.
