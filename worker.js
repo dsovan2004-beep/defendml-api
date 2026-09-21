@@ -1,5 +1,6 @@
 import { isQualifiedMemory, qualifiesMemoryOutcome, MEMORY_QUALIFICATION_VERSION } from './memory-qualification.mjs';
 import { isExecutableTest } from './executable-test-eligibility.mjs';
+import { runMcpResourceScopeScan } from './mcp-resource-scope-scan.mjs';
 export const TARGET_SECRET_REDACTION_MARKER = "[REDACTED_TARGET_SECRET]";
 export const TARGET_SECRET_MIN_LENGTH = 8;
 
@@ -1879,6 +1880,56 @@ const worker = {
           } catch (_err) {
             return rawText; // fallback to raw if parse fails
           }
+        }
+
+        // ── MCP interface: native resource-scope scan ─────────────────────────
+        // An MCP server is not a chat endpoint, so the HTTP health probe and the
+        // HTTP swarm below do not apply. Run the native MCP resource-scope scan,
+        // persist its single canonical row, complete the report, and return.
+        if (String(target.target_type || "").toLowerCase() === "mcp") {
+          const mcpStart = Date.now();
+          const mcpRow = await runMcpResourceScopeScan({
+            target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+          });
+          try {
+            await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
+              method: "POST",
+              headers: { ...sbHeaders, prefer: "return=minimal,resolution=ignore-duplicates" },
+              body: JSON.stringify([mcpRow]),
+            });
+          } catch (e) {
+            console.error(`[mcp-results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
+          }
+          const blocked = mcpRow.decision === "BLOCK" ? 1 : 0;
+          const allowed = mcpRow.decision === "ALLOW" ? 1 : 0;
+          const errors = mcpRow.decision === "ERROR" ? 1 : 0;
+          const decided = blocked + allowed;
+          const blockRate = decided > 0 ? Math.round((blocked / decided) * 100) : 0;
+          const completedAt = new Date().toISOString();
+          const patchRes = await fetch(`${SB_URL}/rest/v1/red_team_reports?id=eq.${encodeURIComponent(report.id)}`, {
+            method: "PATCH",
+            headers: { ...sbHeaders, prefer: "return=representation" },
+            body: JSON.stringify({
+              total_prompts: 1, total_tests: 1,
+              blocked_count: blocked, allowed_count: allowed, flagged_count: 0, error_count: errors,
+              block_rate: blockRate, success_rate: blockRate,
+              total_latency_ms: Date.now() - mcpStart,
+              completed_at: completedAt, analysis_completed_at: completedAt,
+              ...(internalJob ? { job_state: "completed", failure_code: null, failed_at: null } : {}),
+              attack_intelligence: sanitizeTargetEvidence({ interface: "mcp", blockRate, riskScore: 100 - blockRate, topVectors: [], categoryBreakdown: {}, categoryTotals: {} }),
+              remediation_playbook: null,
+              layer_breakdown: sanitizeTargetEvidence({ interface: "mcp", total_agents: 1, pipeline_version: "mcp-resource-scope-v1", decision: mcpRow.decision }),
+            }),
+          });
+          if (!patchRes.ok) {
+            return withCORS(json({ success: false, error: "report_completion_write_failed" }, 500), request);
+          }
+          await fetch(`${SB_URL}/rest/v1/targets?id=eq.${encodeURIComponent(targetId)}`, {
+            method: "PATCH", headers: sbHeaders,
+            body: JSON.stringify({ last_scan_at: completedAt, last_report_id: report.id, last_scan_status: "completed", total_scans: Number(target.total_scans || 0) + 1 }),
+          });
+          ctx.waitUntil(logEvent({ status: 200, action: "ALLOWED" }));
+          return withCORS(json({ success: true, report_id: report.report_id, interface: "mcp", decision: mcpRow.decision }), request);
         }
 
         // ── FIX #155: Pre-scan target validation (AI endpoint health check) ─────
