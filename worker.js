@@ -4,6 +4,7 @@ import { runMcpResourceScopeScan } from './mcp-resource-scope-scan.mjs';
 import { runMultiTurnSequenceScan } from './multiturn-sequence-scan.mjs';
 import { runToolActionScan } from './action-effect-scan.mjs';
 import { runMemoryPersistenceScan } from './memory-persistence-scan.mjs';
+import { runRagIndirectInjectionScan } from './rag-indirect-injection-scan.mjs';
 export const TARGET_SECRET_REDACTION_MARKER = "[REDACTED_TARGET_SECRET]";
 export const TARGET_SECRET_MIN_LENGTH = 8;
 
@@ -2096,6 +2097,59 @@ const worker = {
           });
           ctx.waitUntil(logEvent({ status: 200, action: "ALLOWED" }));
           return withCORS(json({ success: true, report_id: report.report_id, interface: "memory", decision: memRow.decision }), request);
+        }
+
+        // ── RAG interface: indirect (retrieval-borne) injection scan ───────────
+        // When a target is explicitly configured for the RAG interface
+        // (metadata.rag.enabled), the boundary is whether an injection carried in
+        // RETRIEVED content is followed. Run the dedicated scan (poisoned + clean
+        // corpus controls), persist its single canonical row, complete the report,
+        // and return. Ordinary AI-endpoint scans are untouched.
+        if (target && target.metadata && typeof target.metadata === "object"
+            && target.metadata.rag && target.metadata.rag.enabled === true) {
+          const ragStart = Date.now();
+          const ragRow = await runRagIndirectInjectionScan({
+            target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+          });
+          try {
+            await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
+              method: "POST",
+              headers: { ...sbHeaders, prefer: "return=minimal,resolution=ignore-duplicates" },
+              body: JSON.stringify([ragRow]),
+            });
+          } catch (e) {
+            console.error(`[rag-results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
+          }
+          const blocked = ragRow.decision === "BLOCK" ? 1 : 0;
+          const allowed = ragRow.decision === "ALLOW" ? 1 : 0;
+          const errors = ragRow.decision === "ERROR" ? 1 : 0;
+          const decided = blocked + allowed;
+          const blockRate = decided > 0 ? Math.round((blocked / decided) * 100) : 0;
+          const completedAt = new Date().toISOString();
+          const patchRes = await fetch(`${SB_URL}/rest/v1/red_team_reports?id=eq.${encodeURIComponent(report.id)}`, {
+            method: "PATCH",
+            headers: { ...sbHeaders, prefer: "return=representation" },
+            body: JSON.stringify({
+              total_prompts: 1, total_tests: 1,
+              blocked_count: blocked, allowed_count: allowed, flagged_count: 0, error_count: errors,
+              block_rate: blockRate, success_rate: blockRate,
+              total_latency_ms: Date.now() - ragStart,
+              completed_at: completedAt, analysis_completed_at: completedAt,
+              ...(internalJob ? { job_state: "completed", failure_code: null, failed_at: null } : {}),
+              attack_intelligence: sanitizeTargetEvidence({ interface: "rag", blockRate, riskScore: 100 - blockRate, topVectors: [], categoryBreakdown: {}, categoryTotals: {} }),
+              remediation_playbook: null,
+              layer_breakdown: sanitizeTargetEvidence({ interface: "rag", total_agents: 1, pipeline_version: "rag-indirect-v1", decision: ragRow.decision }),
+            }),
+          });
+          if (!patchRes.ok) {
+            return withCORS(json({ success: false, error: "report_completion_write_failed" }, 500), request);
+          }
+          await fetch(`${SB_URL}/rest/v1/targets?id=eq.${encodeURIComponent(targetId)}`, {
+            method: "PATCH", headers: sbHeaders,
+            body: JSON.stringify({ last_scan_at: completedAt, last_report_id: report.id, last_scan_status: "completed", total_scans: Number(target.total_scans || 0) + 1 }),
+          });
+          ctx.waitUntil(logEvent({ status: 200, action: "ALLOWED" }));
+          return withCORS(json({ success: true, report_id: report.report_id, interface: "rag", decision: ragRow.decision }), request);
         }
 
         // ── FIX #155: Pre-scan target validation (AI endpoint health check) ─────
