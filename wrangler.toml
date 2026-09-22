@@ -31,7 +31,7 @@ CORS_ORIGIN = "https://defendml.com,https://www.defendml.com,https://app.defendm
 MOCK_MODE = "false"
 STRICT_MODE = "false"
 SUPABASE_URL = "https://rhwvzhksjbsdymvvzxln.supabase.co"
-ANTHROPIC_MODEL = "claude-3-5-sonnet-20241022"
+CLAUDE_MODEL = "claude-haiku-4-5"
 FF_ASL3_STATUS = "true"
 FF_INCIDENT_CENTER = "true"
 
