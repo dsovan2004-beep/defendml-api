@@ -3,6 +3,7 @@ import { isExecutableTest } from './executable-test-eligibility.mjs';
 import { runMcpResourceScopeScan } from './mcp-resource-scope-scan.mjs';
 import { runMultiTurnSequenceScan } from './multiturn-sequence-scan.mjs';
 import { runToolActionScan } from './action-effect-scan.mjs';
+import { runToolActionCallbackScan, makeCanaryStore } from './action-callback-scan.mjs';
 import { runMemoryPersistenceScan } from './memory-persistence-scan.mjs';
 import { runRagIndirectInjectionScan } from './rag-indirect-injection-scan.mjs';
 export const TARGET_SECRET_REDACTION_MARKER = "[REDACTED_TARGET_SECRET]";
@@ -2001,9 +2002,19 @@ const worker = {
         if (target && target.metadata && typeof target.metadata === "object"
             && target.metadata.action && target.metadata.action.enabled === true) {
           const actStart = Date.now();
-          const actRow = await runToolActionScan({
-            target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
-          });
+          // Two adapters, one contract + qualifier. mode='callback' drives a REAL
+          // customer agent and witnesses execution out-of-band via the canary-
+          // callback store (action-callback-v1); the default is the fixed-contract
+          // fixture runner (action-http-v1). Both emit the same canonical row.
+          const actMode = String(target.metadata.action.mode || "").toLowerCase();
+          const actRow = actMode === "callback"
+            ? await runToolActionCallbackScan({
+                target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+                store: makeCanaryStore({ sbUrl: SB_URL, sbHeaders, fetchImpl: fetch }),
+              })
+            : await runToolActionScan({
+                target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+              });
           try {
             await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
               method: "POST",
@@ -2031,7 +2042,7 @@ const worker = {
               ...(internalJob ? { job_state: "completed", failure_code: null, failed_at: null } : {}),
               attack_intelligence: sanitizeTargetEvidence({ interface: "action", blockRate, riskScore: 100 - blockRate, topVectors: [], categoryBreakdown: {}, categoryTotals: {} }),
               remediation_playbook: null,
-              layer_breakdown: sanitizeTargetEvidence({ interface: "action", total_agents: 1, pipeline_version: "tool-action-effect-v1", decision: actRow.decision }),
+              layer_breakdown: sanitizeTargetEvidence({ interface: "action", total_agents: 1, pipeline_version: actMode === "callback" ? "action-callback-v1" : "action-http-v1", decision: actRow.decision }),
             }),
           });
           if (!patchRes.ok) {
