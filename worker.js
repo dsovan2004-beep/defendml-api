@@ -5,7 +5,9 @@ import { runMultiTurnSequenceScan } from './multiturn-sequence-scan.mjs';
 import { runToolActionScan } from './action-effect-scan.mjs';
 import { runToolActionCallbackScan, makeCanaryStore } from './action-callback-scan.mjs';
 import { runMemoryPersistenceScan } from './memory-persistence-scan.mjs';
+import { runMemorySessionScan } from './memory-session-scan.mjs';
 import { runRagIndirectInjectionScan } from './rag-indirect-injection-scan.mjs';
+import { runRagSeededCorpusScan } from './rag-seeded-corpus-scan.mjs';
 export const TARGET_SECRET_REDACTION_MARKER = "[REDACTED_TARGET_SECRET]";
 export const TARGET_SECRET_MIN_LENGTH = 8;
 
@@ -2066,9 +2068,18 @@ const worker = {
         if (target && target.metadata && typeof target.metadata === "object"
             && target.metadata.memory && target.metadata.memory.enabled === true) {
           const memStart = Date.now();
-          const memRow = await runMemoryPersistenceScan({
-            target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
-          });
+          // Two adapters, one contract + qualifier. mode='session' drives a REAL
+          // endpoint's own cross-session persistence via its native scope key
+          // (memory-session-v1); the default is the fixed-contract fixture runner
+          // (memory-http-v1). Both emit the same canonical row.
+          const memMode = String(target.metadata.memory.mode || "").toLowerCase();
+          const memRow = memMode === "session"
+            ? await runMemorySessionScan({
+                target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+              })
+            : await runMemoryPersistenceScan({
+                target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+              });
           try {
             await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
               method: "POST",
@@ -2096,7 +2107,7 @@ const worker = {
               ...(internalJob ? { job_state: "completed", failure_code: null, failed_at: null } : {}),
               attack_intelligence: sanitizeTargetEvidence({ interface: "memory", blockRate, riskScore: 100 - blockRate, topVectors: [], categoryBreakdown: {}, categoryTotals: {} }),
               remediation_playbook: null,
-              layer_breakdown: sanitizeTargetEvidence({ interface: "memory", total_agents: 1, pipeline_version: "persistent-memory-v1", decision: memRow.decision }),
+              layer_breakdown: sanitizeTargetEvidence({ interface: "memory", total_agents: 1, pipeline_version: memMode === "session" ? "memory-session-v1" : "memory-http-v1", decision: memRow.decision }),
             }),
           });
           if (!patchRes.ok) {
@@ -2119,9 +2130,18 @@ const worker = {
         if (target && target.metadata && typeof target.metadata === "object"
             && target.metadata.rag && target.metadata.rag.enabled === true) {
           const ragStart = Date.now();
-          const ragRow = await runRagIndirectInjectionScan({
-            target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
-          });
+          // Two adapters, one contract + qualifier. mode='seeded' drives a REAL RAG
+          // endpoint whose corpus the customer has seeded with one synthetic poison
+          // doc (rag-seeded-corpus-v1); the default is the fixed-contract fixture
+          // runner with its corpus toggle (rag-http-v1). Both emit the same canonical row.
+          const ragMode = String(target.metadata.rag.mode || "").toLowerCase();
+          const ragRow = ragMode === "seeded"
+            ? await runRagSeededCorpusScan({
+                target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+              })
+            : await runRagIndirectInjectionScan({
+                target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+              });
           try {
             await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
               method: "POST",
@@ -2149,7 +2169,7 @@ const worker = {
               ...(internalJob ? { job_state: "completed", failure_code: null, failed_at: null } : {}),
               attack_intelligence: sanitizeTargetEvidence({ interface: "rag", blockRate, riskScore: 100 - blockRate, topVectors: [], categoryBreakdown: {}, categoryTotals: {} }),
               remediation_playbook: null,
-              layer_breakdown: sanitizeTargetEvidence({ interface: "rag", total_agents: 1, pipeline_version: "rag-indirect-v1", decision: ragRow.decision }),
+              layer_breakdown: sanitizeTargetEvidence({ interface: "rag", total_agents: 1, pipeline_version: ragMode === "seeded" ? "rag-seeded-corpus-v1" : "rag-indirect-v1", decision: ragRow.decision }),
             }),
           });
           if (!patchRes.ok) {
