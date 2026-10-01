@@ -29,6 +29,11 @@ current or vulnerability-free. Review toolchain maintenance separately.
    `npm run provenance:record`. The command rebuilds, validates the supplied
    metadata against its hash, checks live HTTP health, and writes an immutable
    `provenance/<versionId>.json`. Review and commit the receipt separately.
+7. **Keep `main` equal to production.** `main` is the canonical release branch:
+   after the receipt commit, fast-forward `main` to the deployed lineage and push
+   it, so `origin/main` always contains the deployed source commit. Never deploy
+   from a branch that is behind `origin/main`. (On 2026-09-30 `origin/main` was
+   found 15 commits behind production and was fast-forwarded to `b364b29`.)
 
 Observation fields: `versionId`, `deploymentId` (Cloudflare UUIDs), `deployedAt`
 (UTC ISO timestamp from Cloudflare), `operator` (non-sensitive handle), `kind`
