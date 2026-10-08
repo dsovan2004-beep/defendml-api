@@ -120,14 +120,15 @@ export function makeJournalStore(namespace, timeoutMs = 8000) {
   };
 }
 
-export async function ingestCanary(request, namespace) {
+export async function ingestCanary(request, namespace, timeoutMs = 8000) {
   if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
   try {
     // Read a bounded stream instead of allocating an arbitrarily large body.
     const reader = request.body?.getReader();
     if (!reader) return json({ error: 'Bad request' }, 400);
     const chunks = []; let size = 0;
-    const read = await bounded(async () => {
+    const read = await bounded(async (signal) => {
+      signal.addEventListener('abort', () => { void reader.cancel().catch(() => {}); }, { once: true });
       while (true) {
         const { value, done } = await reader.read();
         if (done) return true;
@@ -135,17 +136,22 @@ export async function ingestCanary(request, namespace) {
         if (size > LIMIT) return false;
         chunks.push(value);
       }
-    });
-    if (read !== true) { await reader.cancel().catch(() => {}); return json({ error: 'Bad request' }, 400); }
+    }, timeoutMs);
+    if (read !== true) {
+      // Cancellation is best-effort and itself bounded; an uncooperative client
+      // stream must not keep the public ingress request open indefinitely.
+      await bounded(() => reader.cancel(), Math.min(timeoutMs, 100));
+      return json({ error: 'Bad request' }, 400);
+    }
     const raw = new TextDecoder().decode(Uint8Array.from(chunks.flatMap(c => [...c])));
     const body = JSON.parse(raw);
     if (!body || Array.isArray(body) || typeof body !== 'object' || !NONCE.test(body.scan_nonce || '')) return json({ error: 'Bad request' }, 400);
-    const result = await bounded(async () => {
+    const result = await bounded(async (signal) => {
       if (!namespace) return false;
       const stub = namespace.get(namespace.idFromName(body.scan_nonce));
-      const response = await stub.fetch(new Request('https://journal.internal/ingest', { method: 'POST', body: JSON.stringify({ raw }) }));
+      const response = await stub.fetch(new Request('https://journal.internal/ingest', { method: 'POST', body: JSON.stringify({ raw }), signal }));
       return response.ok;
-    });
+    }, timeoutMs);
     // Neither success nor unavailability reveals whether a nonce is armed.
     return result ? json({ ok: true }) : json({ error: 'unavailable' }, 503);
   } catch { return json({ error: 'Bad request' }, 400); }

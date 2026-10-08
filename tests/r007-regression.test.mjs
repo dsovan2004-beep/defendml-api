@@ -74,6 +74,57 @@ test('R007-2: stalled journal read remains bounded and the scan still disarms ev
   assert.deepEqual(disarmed.sort(), [...nonces].sort());
 });
 
+test('R008-1: failed poll followed by successful no-proof seal remains a technical error', async () => {
+  const nonces = ['a', 'b', 'c'].map(suffix => 'dml-cb-' + suffix.repeat(32));
+  const queue = [...nonces];
+  const journal = fakeJournal().journal;
+  const namespace = {
+    idFromName: value => value,
+    get: nonce => ({ fetch: async request => {
+      if (new URL(request.url).pathname === '/poll' && nonce === nonces[1]) {
+        return { ok: true, json: () => new Promise(() => {}) };
+      }
+      return journal.fetch(request);
+    } }),
+  };
+  const store = makeJournalStore(namespace, 15);
+  const row = await runToolActionCallbackScan({
+    target: { url: 'https://isolated.invalid', protected_marker: 'SYNTHETIC-CANARY', metadata: { action: {} } },
+    reportId: 'synthetic-report', genNonce: () => queue.shift(), pollAttempts: 1, sleep: async () => {},
+    callbackUrl: 'https://isolated.invalid/callback',
+    probeFetch: async (_url, init) => ingestCanary(new Request('https://isolated.invalid/callback', init), namespace),
+    fetchImpl: async () => ({ status: 200, text: async () => 'completed' }), store,
+  });
+  assert.equal(row.decision, 'ERROR');
+  assert.equal(row.case_observation.collection_failed, true);
+  assert.equal(row.case_observation.complete, false, 'seal cannot erase the failed poll');
+  assert.equal(row.case_observation.exploit_complete, false);
+});
+
+test('R008-1: seal failure cannot erase proof already observed by polling', async () => {
+  const nonces = ['benign', 'exploit', 'probe'];
+  const row = await runToolActionCallbackScan({
+    target: { url: 'https://isolated.invalid', protected_marker: 'SYNTHETIC-CANARY', metadata: { action: {} } },
+    reportId: 'synthetic-report', genNonce: () => nonces.shift(), pollAttempts: 1, sleep: async () => {},
+    callbackUrl: 'https://isolated.invalid/callback', probeFetch: async () => ({ status: 200 }),
+    fetchImpl: async () => ({ status: 200, text: async () => 'completed' }),
+    store: {
+      arm: async () => true,
+      poll: async nonce => ({ storeOk: true, proofObserved: nonce === 'exploit' || nonce === 'probe', received: nonce === 'exploit' || nonce === 'probe', count: 1, events: [] }),
+      seal: async nonce => nonce === 'exploit'
+        ? { storeOk: false }
+        : { storeOk: true, proofObserved: nonce === 'probe', received: nonce === 'probe', count: 1, events: [], collectionComplete: true },
+      disarm: async () => {},
+    },
+  });
+  assert.equal(row.decision, 'ALLOW');
+  assert.equal(row.case_observation.executed, true);
+  assert.equal(row.case_observation.exploit_complete, true);
+  assert.equal(row.case_observation.collection_failed, true);
+  assert.equal(row.case_observation.complete, false, 'the seal failure remains a limitation');
+  assert.ok(!JSON.stringify(row).includes('SYNTHETIC-CANARY'));
+});
+
 test('R007-1: independently recorded exploit survives failed benign collection', async () => {
   const nonces = ['benign', 'exploit', 'probe'];
   let cleaned = false;
@@ -192,6 +243,36 @@ test('public journal ingress bounds body size and hides nonce existence', async 
   const unknown = await ingestCanary(new Request('https://worker.invalid', { method: 'POST', body: JSON.stringify({ scan_nonce: 'dml-cb-' + 'f'.repeat(32), note: 'junk' }) }), namespace);
   assert.equal(unknown.status, 200);
   assert.deepEqual(await unknown.json(), { ok: true });
+});
+
+test('R008-2: oversized-body cancellation cannot stall public ingress', async () => {
+  let cancelCalled = false;
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(32769)); },
+    cancel() { cancelCalled = true; return new Promise(() => {}); },
+  });
+  const request = new Request('https://worker.invalid/callback', { method: 'POST', body, duplex: 'half' });
+  const response = await Promise.race([
+    ingestCanary(request, null, 20),
+    new Promise(resolve => setTimeout(() => resolve('hung'), 200)),
+  ]);
+  assert.notEqual(response, 'hung');
+  assert.equal(response.status, 400);
+  assert.equal(cancelCalled, true);
+});
+
+test('R008-2: timed-out Durable Object ingress dispatch receives an aborted signal', async () => {
+  let dispatchSignal;
+  const namespace = {
+    idFromName: value => value,
+    get: () => ({ fetch: async request => { dispatchSignal = request.signal; return new Promise(() => {}); } }),
+  };
+  const request = new Request('https://worker.invalid/callback', { method: 'POST', body: JSON.stringify({
+    scan_nonce: 'dml-cb-' + 'f'.repeat(32), note: 'synthetic',
+  }) });
+  const response = await ingestCanary(request, namespace, 20);
+  assert.equal(response.status, 503);
+  assert.equal(dispatchSignal.aborted, true);
 });
 
 test('public journal ingress is rate-limited before Durable Object dispatch', async () => {
