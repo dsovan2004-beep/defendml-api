@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { buildScanJobMessage, canTransitionScanJob, redactTargetSecrets } from "../worker.js";
+import { buildScanJobMessage, canTransitionScanJob, redactTargetSecrets } from "../worker-helpers.mjs";
 
 const source = fs.readFileSync(new URL("../worker.js", import.meta.url), "utf8");
 const appDispatch = fs.readFileSync("/Users/dustinsovan/DefendML-Code/.claude/worktrees/focused-bhabha-63a923/functions/api/attack-plan-execute.ts", "utf8");

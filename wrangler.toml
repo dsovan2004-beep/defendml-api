@@ -4,6 +4,14 @@ main = "worker.js"
 compatibility_date = "2025-01-01"
 workers_dev = true
 
+[[durable_objects.bindings]]
+name = "CANARY_JOURNAL"
+class_name = "CanaryJournal"
+
+[[migrations]]
+tag = "canary-journal-v1"
+new_sqlite_classes = ["CanaryJournal"]
+
 # KV Namespaces
 # FIX #9: removed unused AUTH_USERS binding (was never referenced in worker.js)
 [[kv_namespaces]]

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { buildTargetSensitiveValues, redactTargetSecrets, TARGET_SECRET_REDACTION_MARKER, TARGET_SECRET_MIN_LENGTH } from '../worker.js';
+import { buildTargetSensitiveValues, redactTargetSecrets, TARGET_SECRET_REDACTION_MARKER, TARGET_SECRET_MIN_LENGTH } from '../worker-helpers.mjs';
 import { isExecutableTest } from '../executable-test-eligibility.mjs';
 
 const source = fs.readFileSync(new URL('../worker.js', import.meta.url), 'utf8');

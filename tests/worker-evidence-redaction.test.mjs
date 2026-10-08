@@ -5,7 +5,7 @@ import {
   buildTargetSensitiveValues,
   redactTargetSecrets,
   safeTargetUrl,
-} from "../worker.js";
+} from "../worker-helpers.mjs";
 
 const generated = (label) => `${label}-${crypto.randomUUID()}`;
 const fixture = () => {

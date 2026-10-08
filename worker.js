@@ -3,98 +3,15 @@ import { isExecutableTest } from './executable-test-eligibility.mjs';
 import { runMcpResourceScopeScan } from './mcp-resource-scope-scan.mjs';
 import { runMultiTurnSequenceScan } from './multiturn-sequence-scan.mjs';
 import { runToolActionScan } from './action-effect-scan.mjs';
-import { runToolActionCallbackScan, makeCanaryStore } from './action-callback-scan.mjs';
+import { runToolActionCallbackScan } from './action-callback-scan.mjs';
+import { makeJournalStore, ingestCanary } from './canary-journal.mjs';
+import { buildScanJobMessage, buildTargetSensitiveValues, redactTargetSecrets,
+  safeTargetUrl, TARGET_SECRET_MIN_LENGTH } from './worker-helpers.mjs';
+export { CanaryJournal } from './canary-journal.mjs';
 import { runMemoryPersistenceScan } from './memory-persistence-scan.mjs';
 import { runMemorySessionScan } from './memory-session-scan.mjs';
 import { runRagIndirectInjectionScan } from './rag-indirect-injection-scan.mjs';
 import { runRagSeededCorpusScan } from './rag-seeded-corpus-scan.mjs';
-export const TARGET_SECRET_REDACTION_MARKER = "[REDACTED_TARGET_SECRET]";
-export const TARGET_SECRET_MIN_LENGTH = 8;
-
-function addSensitiveValue(values, value) {
-  if (typeof value !== "string" || value.length < TARGET_SECRET_MIN_LENGTH) return;
-  values.add(value);
-  try {
-    const decoded = decodeURIComponent(value);
-    if (decoded.length >= TARGET_SECRET_MIN_LENGTH) values.add(decoded);
-  } catch (_) {}
-}
-
-function addUrlSensitiveValues(values, rawUrl, base) {
-  if (typeof rawUrl !== "string" || !rawUrl) return;
-  try {
-    const parsed = base ? new URL(rawUrl, base) : new URL(rawUrl);
-    addSensitiveValue(values, parsed.username);
-    addSensitiveValue(values, parsed.password);
-    for (const value of parsed.searchParams.values()) addSensitiveValue(values, value);
-    if (parsed.hash) {
-      const fragment = parsed.hash.slice(1);
-      addSensitiveValue(values, fragment);
-      for (const value of new URLSearchParams(fragment).values()) addSensitiveValue(values, value);
-    }
-  } catch (_) {}
-}
-
-export function buildTargetSensitiveValues(target) {
-  const values = new Set();
-  addSensitiveValue(values, target?.auth_token);
-  addSensitiveValue(values, target?.api_key);
-  // The protected marker is the value a disclosure test hunts for. Disclosure is
-  // observed before redaction; the marker itself must never reach persistence.
-  addSensitiveValue(values, target?.protected_marker);
-  if (target?.custom_headers && typeof target.custom_headers === "object") {
-    for (const value of Object.values(target.custom_headers)) addSensitiveValue(values, value);
-  }
-  addUrlSensitiveValues(values, target?.url);
-  addUrlSensitiveValues(values, target?.endpoint_path, target?.url);
-  return [...values].sort((a, b) => b.length - a.length || a.localeCompare(b));
-}
-
-export function redactTargetSecrets(value, sensitiveValues) {
-  if (typeof value === "string") {
-    let redacted = value;
-    for (const secret of sensitiveValues || []) {
-      redacted = redacted.split(secret).join(TARGET_SECRET_REDACTION_MARKER);
-    }
-    return redacted;
-  }
-  if (Array.isArray(value)) return value.map((item) => redactTargetSecrets(item, sensitiveValues));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, redactTargetSecrets(item, sensitiveValues)])
-    );
-  }
-  return value;
-}
-
-export function safeTargetUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    parsed.username = "";
-    parsed.password = "";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString();
-  } catch (_) {
-    return "configured target";
-  }
-}
-
-export const SCAN_JOB_TRANSITIONS = Object.freeze({
-  queued: Object.freeze(["running", "failed"]),
-  running: Object.freeze(["queued", "completed", "failed"]),
-  completed: Object.freeze([]),
-  failed: Object.freeze([]),
-});
-
-export function canTransitionScanJob(from, to) {
-  return Boolean(SCAN_JOB_TRANSITIONS[from]?.includes(to));
-}
-
-export function buildScanJobMessage(jobId) {
-  return { jobId };
-}
-
 const worker = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -229,6 +146,14 @@ const worker = {
       const resp = withCORS(json({ success: false, error: "rate_limited", retry_after: rl.retryAfter }, 429), request);
       resp.headers.set("Retry-After", String(rl.retryAfter));
       ctx.waitUntil(logEvent({ status: 429, action: "BLOCKED" }));
+      return resp;
+    }
+
+    // Public ingestion only. Keep it behind the Worker IP rate limit; arm/read/
+    // seal/delete remain private namespace calls, never exposed by the router.
+    if (url.pathname === '/api/canary/ingest') {
+      const resp = withCORS(await ingestCanary(request, env.CANARY_JOURNAL), request);
+      ctx.waitUntil(logEvent({ status: resp.status, action: resp.ok ? 'OK' : 'ERROR' }));
       return resp;
     }
 
@@ -2021,7 +1946,7 @@ const worker = {
           const actRow = actMode === "callback"
             ? await runToolActionCallbackScan({
                 target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
-                store: makeCanaryStore({ sbUrl: SB_URL, sbHeaders, fetchImpl: fetch }),
+                store: makeJournalStore(env.CANARY_JOURNAL),
                 // The public callback endpoint the customer's tool posts to; the
                 // runner sends one collection-health probe through it (R005-2).
                 callbackUrl: (typeof env.CANARY_CALLBACK_URL === "string" && env.CANARY_CALLBACK_URL) || "https://app.defendml.com/api/canary/callback",
