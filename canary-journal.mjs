@@ -73,7 +73,7 @@ export class CanaryJournal {
         }
         const continuous = !this.failed && input.epoch === this.epoch && state.epoch === this.epoch;
         return json({ storeOk: Boolean(state.proof || continuous), proofObserved: state.proof,
-          received: state.received, events: [], collectionComplete: continuous && state.sealed });
+          received: state.received, count: state.count, events: [], collectionComplete: continuous && state.sealed });
       } catch {
         this.failed = true;
         return json({ ok: false, storeOk: false }, 503);

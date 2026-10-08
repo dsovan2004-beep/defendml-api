@@ -77,15 +77,20 @@ test('R007-2: stalled journal read remains bounded and the scan still disarms ev
 test('R008-1: failed poll followed by successful no-proof seal remains a technical error', async () => {
   const nonces = ['a', 'b', 'c'].map(suffix => 'dml-cb-' + suffix.repeat(32));
   const queue = [...nonces];
-  const journal = fakeJournal().journal;
+  const journals = new Map();
+  const armed = [];
   const namespace = {
     idFromName: value => value,
-    get: nonce => ({ fetch: async request => {
-      if (new URL(request.url).pathname === '/poll' && nonce === nonces[1]) {
-        return { ok: true, json: () => new Promise(() => {}) };
-      }
-      return journal.fetch(request);
-    } }),
+    get: nonce => {
+      if (!journals.has(nonce)) journals.set(nonce, fakeJournal().journal);
+      const journal = journals.get(nonce);
+      return { fetch: async request => {
+        const op = new URL(request.url).pathname;
+        if (op === '/arm') armed.push(nonce);
+        if (op === '/poll' && nonce === nonces[1]) return { ok: true, json: () => new Promise(() => {}) };
+        return journal.fetch(request);
+      } };
+    },
   };
   const store = makeJournalStore(namespace, 15);
   const row = await runToolActionCallbackScan({
@@ -99,6 +104,49 @@ test('R008-1: failed poll followed by successful no-proof seal remains a technic
   assert.equal(row.case_observation.collection_failed, true);
   assert.equal(row.case_observation.complete, false, 'seal cannot erase the failed poll');
   assert.equal(row.case_observation.exploit_complete, false);
+  assert.equal(row.case_observation.collection_verified, true, 'the probe succeeds independently of the injected exploit-poll failure');
+  assert.deepEqual(armed.sort(), [...nonces].sort(), 'each nonce is armed in its own journal');
+});
+
+test('R009-1: a real journal callback remains a finding when the target response fails', async () => {
+  const nonces = ['d', 'e', 'f'].map(suffix => 'dml-cb-' + suffix.repeat(32));
+  const queue = [...nonces];
+  const journals = new Map();
+  const namespace = {
+    idFromName: value => value,
+    get: nonce => {
+      if (!journals.has(nonce)) journals.set(nonce, fakeJournal().journal);
+      return { fetch: request => journals.get(nonce).fetch(request) };
+    },
+  };
+  let agentRequests = 0;
+  const store = makeJournalStore(namespace, 50);
+  const row = await runToolActionCallbackScan({
+    target: { url: 'https://isolated.invalid', protected_marker: 'SYNTHETIC-CANARY', metadata: { action: {} } },
+    reportId: 'synthetic-report', genNonce: () => queue.shift(), pollAttempts: 1, sleep: async () => {},
+    callbackUrl: 'https://isolated.invalid/callback',
+    probeFetch: async (_url, init) => ingestCanary(new Request('https://isolated.invalid/callback', init), namespace),
+    fetchImpl: async () => {
+      agentRequests += 1;
+      if (agentRequests === 1) return { status: 200, text: async () => 'benign request complete' };
+      const callback = await ingestCanary(new Request('https://isolated.invalid/callback', {
+        method: 'POST', body: JSON.stringify({ scan_nonce: nonces[1], note: 'SYNTHETIC-CANARY' }),
+      }), namespace);
+      assert.equal(callback.status, 200);
+      return { status: 503, text: async () => 'temporary synthetic failure' };
+    },
+    store,
+  });
+  assert.equal(row.decision, 'ALLOW');
+  assert.equal(row.case_observation.executed, true);
+  assert.equal(row.case_observation.boundary_reached, true, 'the matched callback independently proves the action crossed the boundary');
+  assert.equal(row.case_observation.exploit_response_failed, true);
+  assert.equal(row.case_observation.complete, false, 'the response failure remains a limitation');
+  assert.equal(row.case_observation.exploit_complete, true);
+  assert.match(row.response_snippet, /target-response=failed/);
+  assert.match(row.response_snippet, /callback-received=true/);
+  assert.match(row.response_snippet, /callback-deliveries=1/);
+  assert.ok(!JSON.stringify(row).includes('SYNTHETIC-CANARY'));
 });
 
 test('R008-1: seal failure cannot erase proof already observed by polling', async () => {
