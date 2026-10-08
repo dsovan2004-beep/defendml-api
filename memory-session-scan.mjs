@@ -75,7 +75,11 @@ async function sendScoped({ url, headers, isOpenAI, model, scopeField, scopeHead
     const reqHeaders = scopeHeader ? { ...headers, [scopeHeader]: scope } : headers;
     const res = await fetchImpl(url, { method: 'POST', headers: reqHeaders, body: JSON.stringify(base), signal: controller.signal });
     if (!res || res.status < 200 || res.status >= 300) return { ok: false, text: '' };
-    const raw = await res.text().catch(() => '');
+    // A response whose body cannot be read is a transport failure, not an empty reply
+    // (an unread control reply must never count as a clean control — R005-2).
+    let raw;
+    try { raw = await res.text(); } catch { return { ok: false, text: '' }; }
+    if (typeof raw !== 'string') return { ok: false, text: '' };
     return { ok: true, text: extractAssistantText(raw).slice(0, MAX_REPLY_CHARS) };
   } catch {
     return { ok: false, text: '' };

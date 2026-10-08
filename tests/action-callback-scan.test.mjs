@@ -11,6 +11,9 @@ const NB = 'dml-cb-benignAAAAAAAAAAAAAAAA';
 const NE = 'dml-cb-exploitBBBBBBBBBBBBBBBB';
 // The benign control's permitted effect: the wired tool recorded the benign token.
 const BENIGN_TOKEN = `dml-benign-${NB.slice(-8)}`;
+// Collection-health probe nonce + token (DefendML's own; healthy unless a test says otherwise).
+const NP = 'dml-cb-probeCCCCCCCCCCCCCCCCCC';
+const PROBE_TOKEN = `dml-probe-${NP.slice(-12)}`;
 
 const TARGET = {
   url: 'https://agent.example.com', endpoint_path: '/chat', request_format: 'openai',
@@ -19,7 +22,7 @@ const TARGET = {
 };
 
 // Deterministic nonces so the mock store can key on benign vs exploit.
-function seqNonce() { let i = 0; return () => (i++ === 0 ? NB : NE); }
+function seqNonce() { const seq = [NB, NE, NP]; let i = 0; return () => seq[Math.min(i++, seq.length - 1)]; }
 
 // Mock agent: returns queued { status, text } per call (benign call, then exploit).
 function mockFetch(responses) {
@@ -39,6 +42,7 @@ function mockStore({ benign, exploit, armReturns = true }) {
     async poll(n) {
       if (n === NB) return benign;
       if (n === NE) return exploit;
+      if (n === NP) return { storeOk: true, received: true, payload: { note: PROBE_TOKEN } };
       return { storeOk: true, received: false, payload: null };
     },
     async disarm(ns) { seen.disarm.push(...ns); },
@@ -46,7 +50,8 @@ function mockStore({ benign, exploit, armReturns = true }) {
 }
 
 const opts = (over = {}) => ({
-  target: TARGET, reportId: 'rep-1', now: () => 1000, sleep: async () => {}, pollAttempts: 2, genNonce: seqNonce(), ...over,
+  target: TARGET, reportId: 'rep-1', now: () => 1000, sleep: async () => {}, pollAttempts: 2, genNonce: seqNonce(),
+  callbackUrl: 'https://app.defendml.com/api/canary/callback', probeFetch: async () => ({ status: 200 }), ...over,
 });
 
 const chat = (content) => JSON.stringify({ choices: [{ message: { content } }] });
@@ -65,8 +70,8 @@ test('ALLOW: exploit callback carries the canary (executed) — verdict is ALLOW
   assert.equal(row.case_observation.adapter, 'action-callback-v1');
   assert.equal(row.case_observation.contract, 'tool-action-effect-v1');
   assert.equal(row.detection_method, 'tool_action_effect');
-  // Cleanup always ran for both nonces.
-  assert.deepEqual(store.seen.disarm.sort(), [NB, NE].sort());
+  // Cleanup always ran for every nonce (benign, exploit, collection probe).
+  assert.deepEqual(store.seen.disarm.sort(), [NB, NE, NP].sort());
 });
 
 // Corrected 2026-09-30: this case used to assert BLOCK. A refusal with no exploit
@@ -223,12 +228,12 @@ test('makeCanaryStore: arm/poll/disarm hit the right REST shapes', async () => {
   const fetchImpl = async (url, init) => {
     calls.push({ url, method: init?.method || 'GET' });
     if ((init?.method || 'GET') === 'GET') {
-      return { ok: true, async json() { return [{ status: 'received', payload: { note: 'x' } }]; } };
+      return { ok: true, async json() { return [{ status: 'received', payload: { note: 'x' }, events: [{ note: 'x' }], proof_observed: false }]; } };
     }
     return { ok: true };
   };
   const store = makeCanaryStore({ sbUrl: 'https://sb.example.co', sbHeaders: { apikey: 'k', authorization: 'Bearer k', 'content-type': 'application/json' }, fetchImpl });
-  assert.equal(await store.arm(NB, 'rep-1'), true);
+  assert.equal(await store.arm(NB, 'rep-1', BENIGN_TOKEN), true);
   const polled = await store.poll(NB);
   assert.equal(polled.received, true);
   assert.equal(polled.storeOk, true);

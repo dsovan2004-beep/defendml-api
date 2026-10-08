@@ -2013,6 +2013,10 @@ const worker = {
             ? await runToolActionCallbackScan({
                 target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
                 store: makeCanaryStore({ sbUrl: SB_URL, sbHeaders, fetchImpl: fetch }),
+                // The public callback endpoint the customer's tool posts to; the
+                // runner sends one collection-health probe through it (R005-2).
+                callbackUrl: (typeof env.CANARY_CALLBACK_URL === "string" && env.CANARY_CALLBACK_URL) || "https://app.defendml.com/api/canary/callback",
+                probeFetch: fetch,
               })
             : await runToolActionScan({
                 target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
