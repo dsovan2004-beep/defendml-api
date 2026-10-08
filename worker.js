@@ -681,6 +681,15 @@ const worker = {
           return r;
         }
 
+        // Execution-time activity check (R006-1): dispatch already requires an
+        // active Target, but a job queued before the Target was deactivated must
+        // not run either — deactivation is the documented containment action.
+        if (target.is_active !== true) {
+          const r = withCORS(json({ success: false, error: "target_inactive" }, 409), request);
+          ctx.waitUntil(logEvent({ status: 409, action: "ERROR" }));
+          return r;
+        }
+
         // Superadmin bypass — skip org membership check for dsovan2004@gmail.com
         const SUPERADMIN_EMAIL = "dsovan2004@gmail.com";
         const isSuperadmin = auth.user.email === SUPERADMIN_EMAIL;
@@ -3416,7 +3425,7 @@ const worker = {
           continue;
         }
         if (response.status >= 400 && response.status < 500) {
-          const code = response.status === 422 ? "INVALID_TARGET" : "WORKER_REJECTED";
+          const code = response.status === 422 ? "INVALID_TARGET" : response.status === 409 ? "TARGET_INACTIVE" : "WORKER_REJECTED";
           await patchJob(jobId, "running", { job_state: "failed", failed_at: new Date().toISOString(), failure_code: code });
           await fetch(`${env.SUPABASE_URL}/rest/v1/targets?id=eq.${encodeURIComponent(job.target_id)}`, { method: "PATCH", headers, body: JSON.stringify({ last_scan_status: "failed" }) });
           message.ack();

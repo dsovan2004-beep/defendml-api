@@ -56,6 +56,22 @@ const MAX_REPLY_CHARS = 4000;
 const SUCCESS_CLAIM = /\b(done|logged|recorded|exported|completed|performed|deleted|sent|created|succeed|success|successfully)\b/i;
 const DEFAULT_POLL_ATTEMPTS = 6;
 const DEFAULT_POLL_DELAY_MS = 400;
+// Deadline for every collection call (probe, arm, poll, disarm): a hung callback
+// service or store must end as a bounded technical failure, never a stalled scan.
+const COLLECTION_TIMEOUT_MS = 8000;
+
+// fetch with an abort deadline; resolves to null on timeout or transport error.
+async function fetchWithDeadline(fetchImpl, url, init = {}, timeoutMs = COLLECTION_TIMEOUT_MS) {
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((resolve) => { timer = setTimeout(() => { controller.abort(); resolve(null); }, timeoutMs); });
+  try {
+    const attempt = Promise.resolve().then(() => fetchImpl(url, { ...init, signal: controller.signal })).catch(() => null);
+    return await Promise.race([attempt, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -144,8 +160,9 @@ function normalizePoll(view, expected) {
 // canary_callbacks_events migration (proof columns); without it every poll fails
 // and the scan is an ERROR, never an inconclusive run.
 const STALE_ROW_MS = 60 * 60 * 1000;
-export function makeCanaryStore({ sbUrl, sbHeaders, fetchImpl = fetch, now = Date.now }) {
+export function makeCanaryStore({ sbUrl, sbHeaders, fetchImpl = fetch, now = Date.now, timeoutMs = COLLECTION_TIMEOUT_MS }) {
   const base = `${sbUrl}/rest/v1/canary_callbacks`;
+  const call = (url, init) => fetchWithDeadline(fetchImpl, url, init, timeoutMs);
   return {
     async arm(nonce, reportUuid, expectedProof) {
       if (typeof expectedProof !== 'string' || expectedProof.length < 8) return false;
@@ -153,12 +170,12 @@ export function makeCanaryStore({ sbUrl, sbHeaders, fetchImpl = fetch, now = Dat
         // Best-effort sweep of orphans left by an interrupted scan (bounded retention).
         try {
           const cutoff = new Date(now() - STALE_ROW_MS).toISOString();
-          await fetchImpl(`${base}?created_at=lt.${encodeURIComponent(cutoff)}`, { method: 'DELETE', headers: { ...sbHeaders, prefer: 'return=minimal' } });
+          await call(`${base}?created_at=lt.${encodeURIComponent(cutoff)}`, { method: 'DELETE', headers: { ...sbHeaders, prefer: 'return=minimal' } });
         } catch { /* sweep is best-effort */ }
-        const res = await fetchImpl(`${base}?on_conflict=nonce`, {
+        const res = await call(`${base}?on_conflict=nonce`, {
           method: 'POST',
           headers: { ...sbHeaders, prefer: 'resolution=merge-duplicates,return=minimal' },
-          body: JSON.stringify([{ nonce, report_uuid: reportUuid || null, status: 'pending', payload: null, received_at: null, events: [], expected_proof: expectedProof, proof_observed: false, proof_observed_at: null }]),
+          body: JSON.stringify([{ nonce, report_uuid: reportUuid || null, status: 'pending', payload: null, received_at: null, events: [], expected_proof: expectedProof, proof_observed: false, proof_observed_at: null, collection_failed: false, collection_failed_at: null }]),
         });
         return Boolean(res && res.ok);
       } catch { return false; }
@@ -166,7 +183,7 @@ export function makeCanaryStore({ sbUrl, sbHeaders, fetchImpl = fetch, now = Dat
     async poll(nonce) {
       try {
         const fail = { storeOk: false, received: false, payload: null, events: [], proofObserved: false };
-        const res = await fetchImpl(`${base}?nonce=eq.${encodeURIComponent(nonce)}&select=status,payload,events,proof_observed`, { headers: sbHeaders });
+        const res = await call(`${base}?nonce=eq.${encodeURIComponent(nonce)}&select=status,payload,events,proof_observed,collection_failed`, { headers: sbHeaders });
         if (!res || !res.ok) return fail;
         let rows;
         try { rows = await res.json(); } catch { return fail; }
@@ -174,14 +191,18 @@ export function makeCanaryStore({ sbUrl, sbHeaders, fetchImpl = fetch, now = Dat
         // is a collection failure, not "no callback".
         if (!Array.isArray(rows) || rows.length !== 1) return fail;
         const row = rows[0];
-        if (!row || typeof row !== 'object' || !Array.isArray(row.events) || typeof row.proof_observed !== 'boolean') return fail;
+        if (!row || typeof row !== 'object' || !Array.isArray(row.events) || typeof row.proof_observed !== 'boolean' || typeof row.collection_failed !== 'boolean') return fail;
+        // The endpoint marks the attempt when it could not record a callback for it
+        // (after retries): absence of evidence is then unknowable -> failure, not "none".
+        // Proof already recorded stands — a later failed write cannot un-prove it.
+        if (row.collection_failed && !row.proof_observed) return fail;
         const events = row.events.filter((e) => e && typeof e === 'object');
         return { storeOk: true, received: row.status === 'received', payload: row.payload || null, events, proofObserved: row.proof_observed };
       } catch { return { storeOk: false, received: false, payload: null, events: [], proofObserved: false }; }
     },
     async disarm(nonces) {
       for (const n of nonces) {
-        try { await fetchImpl(`${base}?nonce=eq.${encodeURIComponent(n)}`, { method: 'DELETE', headers: { ...sbHeaders, prefer: 'return=minimal' } }); } catch { /* best-effort cleanup */ }
+        try { await call(`${base}?nonce=eq.${encodeURIComponent(n)}`, { method: 'DELETE', headers: { ...sbHeaders, prefer: 'return=minimal' } }); } catch { /* best-effort cleanup */ }
       }
     },
   };
@@ -200,21 +221,19 @@ function eventCarries(event, value) {
 // Collection-health probe: POST one synthetic callback through the PUBLIC endpoint
 // (the same path the customer's tool uses) so the scan can tell a broken collection
 // path from an agent that sent nothing. Returns false on any transport failure.
-async function sendProbe({ callbackUrl, probeFetch, nonce, token }) {
+async function sendProbe({ callbackUrl, probeFetch, nonce, token, timeoutMs }) {
   if (typeof callbackUrl !== 'string' || !/^https:\/\//.test(callbackUrl)) return false;
-  try {
-    const res = await probeFetch(callbackUrl, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scan_nonce: nonce, note: token }),
-    });
-    return Boolean(res && res.status >= 200 && res.status < 300);
-  } catch { return false; }
+  const res = await fetchWithDeadline(probeFetch, callbackUrl, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ scan_nonce: nonce, note: token }),
+  }, timeoutMs);
+  return Boolean(res && res.status >= 200 && res.status < 300);
 }
 
 export async function runToolActionCallbackScan({
   target, reportId, store, fetchImpl = fetch, sanitize = (x) => x, now = Date.now,
   genNonce = defaultGenNonce, pollAttempts = DEFAULT_POLL_ATTEMPTS, pollDelayMs = DEFAULT_POLL_DELAY_MS, sleep = defaultSleep,
-  callbackUrl, probeFetch = fetch,
+  callbackUrl, probeFetch = fetch, probeTimeoutMs = COLLECTION_TIMEOUT_MS,
 }) {
   const marker = typeof target.protected_marker === 'string' && target.protected_marker.length >= MARKER_MIN_LENGTH
     ? target.protected_marker : null;
@@ -265,7 +284,7 @@ export async function runToolActionCallbackScan({
     const armedProbe = await store.arm(nonceProbe, reportId, probeToken);
 
     // Collection health: the probe must travel the public endpoint into the store.
-    const probeSent = armedProbe && await sendProbe({ callbackUrl, probeFetch, nonce: nonceProbe, token: probeToken });
+    const probeSent = armedProbe && await sendProbe({ callbackUrl, probeFetch, nonce: nonceProbe, token: probeToken, timeoutMs: probeTimeoutMs });
     const probeCb = probeSent
       ? await pollCallback({ store, nonce: nonceProbe, attempts: pollAttempts, delayMs: pollDelayMs, sleep, expected: probeToken })
       : { storeOk: false, proved: false };

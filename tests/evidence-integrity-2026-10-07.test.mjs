@@ -142,7 +142,7 @@ test('collection: makeCanaryStore.poll returns every retained event and rejects 
   const e1 = { note: 'a' }; const e2 = { note: 'b' };
   let lastUrl = '';
   const withEvents = makeCanaryStore({ sbUrl: 'https://sb.example.co', sbHeaders, fetchImpl: async (url) => {
-    lastUrl = url; return { ok: true, async json() { return [{ status: 'received', payload: e1, events: [e1, e2], proof_observed: false }]; } };
+    lastUrl = url; return { ok: true, async json() { return [{ status: 'received', payload: e1, events: [e1, e2], proof_observed: false, collection_failed: false }]; } };
   } });
   const polled = await withEvents.poll(NE);
   assert.ok(lastUrl.includes('events'), 'poll must select the events column');
@@ -306,7 +306,7 @@ test('R005-2: makeCanaryStore treats unparseable, missing or malformed rows as c
   assert.equal((await mk(async () => [{ status: 'received', events: [], proof_observed: true }, { status: 'received', events: [], proof_observed: false }]).poll(NE)).storeOk, false, 'ambiguous (more than one row for a nonce)');
   assert.equal((await mk(async () => [{ status: 'received', events: 'x', proof_observed: true }]).poll(NE)).storeOk, false);
   assert.equal((await mk(async () => [{ status: 'pending', events: [], proof_observed: 'yes' }]).poll(NE)).storeOk, false);
-  const okv = await mk(async () => [{ status: 'received', events: [], proof_observed: true }]).poll(NE);
+  const okv = await mk(async () => [{ status: 'received', events: [], proof_observed: true, collection_failed: false }]).poll(NE);
   assert.equal(okv.storeOk, true);
   assert.equal(okv.proofObserved, true);
 });
@@ -344,4 +344,53 @@ test('R005-5: reproduction steps describe transmission of the canary, not proven
   assert.doesNotMatch(steps, /actually executed/);
   assert.match(steps, /transmitted it through the wired tool/);
   assert.match(steps, /does not authenticate the caller/);
+});
+
+// ── R-006 corrections ────────────────────────────────────────────────────────
+test('R006-2: a probe that never settles ends as a bounded technical failure', async () => {
+  const started = Date.now();
+  const row = await run(eventsStore({ benign: benignOk, exploit: [] }), undefined, TARGET, { probeFetch: () => new Promise(() => {}), probeTimeoutMs: 50 });
+  assert.ok(Date.now() - started < 2000, 'returned within the deadline');
+  assert.equal(row.case_observation.collection_verified, false);
+  assert.equal(row.case_observation.complete, false);
+  assert.equal(row.decision, 'ERROR');
+});
+
+test('R006-2: a store call that never settles is a collection failure, not "no evidence"', async () => {
+  const store = makeCanaryStore({ sbUrl: 'https://sb.example.co', sbHeaders: { apikey: 'k' }, timeoutMs: 50, fetchImpl: () => new Promise(() => {}) });
+  const started = Date.now();
+  const v = await store.poll(NE);
+  assert.ok(Date.now() - started < 2000);
+  assert.equal(v.storeOk, false);
+  assert.equal(await store.arm(NE, 'rep-1', MARKER), false);
+});
+
+test('R005-2 residual: an attempt the endpoint marked as not collected is a failure', async () => {
+  const sbHeaders = { apikey: 'k' };
+  const mk = (rows) => makeCanaryStore({ sbUrl: 'https://sb.example.co', sbHeaders, fetchImpl: async () => ({ ok: true, async json() { return rows; } }) });
+  assert.equal((await mk([{ status: 'received', events: [], proof_observed: false, collection_failed: true }]).poll(NE)).storeOk, false);
+  assert.equal((await mk([{ status: 'received', events: [], proof_observed: false }]).poll(NE)).storeOk, false, 'row without the collection_failed column');
+  assert.equal((await mk([{ status: 'received', events: [], proof_observed: false, collection_failed: false }]).poll(NE)).storeOk, true);
+});
+
+test('R-006: proof already recorded stands when a later write for the attempt failed', async () => {
+  const store = makeCanaryStore({ sbUrl: 'https://sb.example.co', sbHeaders: { apikey: 'k' }, fetchImpl: async () => ({ ok: true, async json() { return [{ status: 'received', events: [], proof_observed: true, collection_failed: true }]; } }) });
+  const polled = await store.poll(NE);
+  assert.equal(polled.storeOk, true, 'a later failed write (e.g. a junk callback) cannot suppress recorded proof');
+  assert.equal(polled.proofObserved, true);
+});
+
+test('R005-2 residual: a marked collection failure on the exploit attempt makes the run ERROR', async () => {
+  const store = {
+    async arm() { return true; },
+    async poll(n) {
+      if (n === NE) return { storeOk: false, received: false, payload: null, events: [], proofObserved: false }; // what poll() returns for collection_failed
+      if (n === NB) return { storeOk: true, received: true, payload: benignOk[0], events: benignOk, proofObserved: true };
+      return { storeOk: true, received: true, payload: null, events: [{ note: PROBE_TOKEN }], proofObserved: true };
+    },
+    async disarm() {},
+  };
+  const row = await run(store);
+  assert.equal(row.case_observation.complete, false);
+  assert.equal(row.decision, 'ERROR');
 });

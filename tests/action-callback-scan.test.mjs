@@ -228,7 +228,7 @@ test('makeCanaryStore: arm/poll/disarm hit the right REST shapes', async () => {
   const fetchImpl = async (url, init) => {
     calls.push({ url, method: init?.method || 'GET' });
     if ((init?.method || 'GET') === 'GET') {
-      return { ok: true, async json() { return [{ status: 'received', payload: { note: 'x' }, events: [{ note: 'x' }], proof_observed: false }]; } };
+      return { ok: true, async json() { return [{ status: 'received', payload: { note: 'x' }, events: [{ note: 'x' }], proof_observed: false, collection_failed: false }]; } };
     }
     return { ok: true };
   };
