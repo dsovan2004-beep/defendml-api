@@ -5,6 +5,7 @@ import { runMultiTurnSequenceScan } from './multiturn-sequence-scan.mjs';
 import { runToolActionScan } from './action-effect-scan.mjs';
 import { runToolActionCallbackScan } from './action-callback-scan.mjs';
 import { makeJournalStore, ingestCanary } from './canary-journal.mjs';
+import { releaseValidationTargets, scanReleaseHeld } from './scan-release-hold.mjs';
 import { buildScanJobMessage, buildTargetSensitiveValues, redactTargetSecrets,
   safeTargetUrl, TARGET_SECRET_MIN_LENGTH } from './worker-helpers.mjs';
 export { CanaryJournal } from './canary-journal.mjs';
@@ -64,7 +65,7 @@ const worker = {
     // before authentication, grant consumption, credits, jobs or Target calls.
     // Pair with Cloudflare queue suspension; never use retries as a long-term
     // pause because they consume the delivery retry budget.
-    if (env.SCAN_RELEASE_HOLD === "true" && request.method === "POST" &&
+    if (env.SCAN_RELEASE_HOLD === "true" && releaseValidationTargets(env).size === 0 && request.method === "POST" &&
         ["/api/scan-jobs/dispatch", "/api/red-team/execute"].includes(url.pathname)) {
       return withCORS(json({ success: false, error: "scan_release_maintenance" }, 503,
         { "retry-after": "60", "cache-control": "no-store" }), request);
@@ -472,6 +473,7 @@ const worker = {
       const targetId = typeof body.targetId === "string" ? body.targetId : "";
       const grantId = typeof body.grant_id === "string" ? body.grant_id : "";
       const objective = typeof body.custom_objective === "string" ? body.custom_objective.trim().slice(0, 200) : "";
+      if (scanReleaseHeld(env, targetId)) return withCORS(json({ success: false, error: "scan_release_maintenance" }, 503), request);
       if (!targetId || !grantId) {
         return withCORS(json({ success: false, error: "authorization_confirmation_required" }, 400), request);
       }
@@ -554,6 +556,7 @@ const worker = {
         }
 
         const body = await request.json().catch(() => ({}));
+        if (scanReleaseHeld(env, body.targetId)) return withCORS(json({ success: false, error: "scan_release_maintenance" }, 503), request);
         const internalJobId = typeof body.jobId === "string" ? body.jobId : "";
         const internalJob = Boolean(
           internalJobId && env.SCAN_JOB_INTERNAL_TOKEN &&
@@ -573,6 +576,7 @@ const worker = {
           const jobs = await jobRes.json().catch(() => []);
           jobRecord = Array.isArray(jobs) ? jobs[0] : null;
           if (!jobRecord) return withCORS(json({ success: false, error: "scan_job_not_runnable" }, 409), request);
+          if (scanReleaseHeld(env, jobRecord.target_id)) return withCORS(json({ success: false, error: "scan_release_maintenance" }, 503), request);
           const userRes = await fetch(`${SB_URL}/rest/v1/users?auth_user_id=eq.${encodeURIComponent(jobRecord.requested_by)}&select=email&limit=1`, { headers: sbHeaders });
           const users = await userRes.json().catch(() => []);
           auth = { ok: true, user: { id: jobRecord.requested_by, email: Array.isArray(users) ? users[0]?.email : "" } };
@@ -3303,7 +3307,7 @@ const worker = {
   },
 
   async queue(batch, env, ctx) {
-    if (env.SCAN_RELEASE_HOLD === "true") {
+    if (env.SCAN_RELEASE_HOLD === "true" && releaseValidationTargets(env).size === 0) {
       // Defensive race backstop only. The operator must pause queue delivery,
       // preserving delayed/retrying jobs instead of repeatedly consuming retries.
       for (const message of batch.messages) message.retry({ delaySeconds: 60 });
@@ -3335,6 +3339,10 @@ const worker = {
           message.ack();
           continue;
         }
+        if (scanReleaseHeld(env, job.target_id)) {
+          message.retry({ delaySeconds: 60 });
+          continue;
+        }
         if (job.job_state === "running") {
           const ageMs = Date.now() - Date.parse(job.job_started_at || 0);
           if (Number.isFinite(ageMs) && ageMs < 15 * 60 * 1000) {
@@ -3358,7 +3366,7 @@ const worker = {
         const response = await worker.fetch(new Request("https://internal.defendml/api/red-team/execute", {
           method: "POST",
           headers: { "content-type": "application/json", "x-scan-job-token": env.SCAN_JOB_INTERNAL_TOKEN },
-          body: JSON.stringify({ jobId }),
+          body: JSON.stringify({ jobId, targetId: job.target_id }),
         }), env, ctx);
 
         if (response.ok) {
