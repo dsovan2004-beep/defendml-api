@@ -2,6 +2,7 @@ name = "defendml-api"
 main = "worker.js"
 # FIX #6: bumped from 2024-01-01 — enables AbortSignal.timeout() + modern APIs
 compatibility_date = "2025-01-01"
+compatibility_flags = ["global_fetch_strictly_public"]
 workers_dev = true
 
 [[durable_objects.bindings]]
