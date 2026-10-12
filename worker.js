@@ -60,6 +60,16 @@ const worker = {
       return withCORS(new Response(null, { status: 204 }), request);
     }
 
+    // Operator-only release containment. Hold admission AND direct execution
+    // before authentication, grant consumption, credits, jobs or Target calls.
+    // Pair with Cloudflare queue suspension; never use retries as a long-term
+    // pause because they consume the delivery retry budget.
+    if (env.SCAN_RELEASE_HOLD === "true" && request.method === "POST" &&
+        ["/api/scan-jobs/dispatch", "/api/red-team/execute"].includes(url.pathname)) {
+      return withCORS(json({ success: false, error: "scan_release_maintenance" }, 503,
+        { "retry-after": "60", "cache-control": "no-store" }), request);
+    }
+
     // -------- small utils --------
     const te = new TextEncoder();
     const getFlag = (v, def = false) => {
@@ -3293,6 +3303,12 @@ const worker = {
   },
 
   async queue(batch, env, ctx) {
+    if (env.SCAN_RELEASE_HOLD === "true") {
+      // Defensive race backstop only. The operator must pause queue delivery,
+      // preserving delayed/retrying jobs instead of repeatedly consuming retries.
+      for (const message of batch.messages) message.retry({ delaySeconds: 60 });
+      return;
+    }
     const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE;
     if (!env.SUPABASE_URL || !serviceKey || !env.SCAN_JOB_INTERNAL_TOKEN) {
       for (const message of batch.messages) message.retry({ delaySeconds: 60 });
