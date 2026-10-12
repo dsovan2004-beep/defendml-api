@@ -3331,10 +3331,18 @@ const worker = {
         continue;
       }
 
+      let releaseTargetValidated = env.SCAN_RELEASE_HOLD !== "true";
       try {
         const jobRes = await fetch(`${env.SUPABASE_URL}/rest/v1/red_team_reports?report_id=eq.${encodeURIComponent(jobId)}&select=job_state,job_started_at,target_id&limit=1`, { headers });
         const jobs = await jobRes.json().catch(() => []);
         const job = Array.isArray(jobs) ? jobs[0] : null;
+        if (env.SCAN_RELEASE_HOLD === "true") {
+          if (!jobRes.ok || !job || scanReleaseHeld(env, job.target_id)) {
+            message.retry({ delaySeconds: 60 });
+            continue;
+          }
+          releaseTargetValidated = true;
+        }
         if (!job || job.job_state === "completed" || job.job_state === "failed") {
           message.ack();
           continue;
@@ -3382,6 +3390,10 @@ const worker = {
         }
         throw new Error("worker_execution_failed");
       } catch (_) {
+        if (!releaseTargetValidated) {
+          message.retry({ delaySeconds: 60 });
+          continue;
+        }
         if (message.attempts >= 3) {
           await patchJob(jobId, "running", { job_state: "failed", failed_at: new Date().toISOString(), failure_code: "WORKER_RETRY_EXHAUSTED" }).catch(() => null);
           message.ack();

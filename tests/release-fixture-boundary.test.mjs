@@ -49,3 +49,21 @@ test('held non-fixture queued job is never claimed, modified or acknowledged', a
   assert.equal(reads, 1);
   assert.equal(retries, 1);
 });
+for (const failure of ['throw', 'http-error', 'invalid-json', 'missing-job', 'missing-target']) {
+  test(`held unresolved ${failure} job is retried without mutation even at exhausted attempts`, async t => {
+    let retries = 0;
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+      assert.equal(init.method, undefined, 'No job writes before fixture validation');
+      if (failure === 'throw') throw new Error('Synthetic lookup failure');
+      if (failure === 'http-error') return Response.json([{ target_id: a }], { status: 503 });
+      if (failure === 'invalid-json') return new Response('{');
+      if (failure === 'missing-job') return Response.json([]);
+      return Response.json([{ job_state: 'queued' }]);
+    });
+    await worker.queue({ messages: [{ body: { jobId: crypto.randomUUID() }, attempts: 999,
+      retry() { retries++; }, ack() { throw new Error('Unresolved pending job acknowledged'); },
+    }] }, { SCAN_RELEASE_HOLD: 'true', SCAN_RELEASE_QA_TARGETS: a, SUPABASE_URL: 'https://synthetic.invalid',
+      SUPABASE_SERVICE_ROLE_KEY: 'synthetic-service', SCAN_JOB_INTERNAL_TOKEN: 'synthetic-internal' }, {});
+    assert.equal(retries, 1);
+  });
+}
