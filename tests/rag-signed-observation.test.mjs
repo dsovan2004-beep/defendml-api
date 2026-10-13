@@ -25,10 +25,10 @@ test('invalid or missing enrollment performs no observer request',async()=>{
   assert.equal(calls,0);
 });
 test('observer transport fails closed and forbids redirects',async()=>{
-  for(const response of [new Response('',{status:503}),new Response('{}'),
+  for(const response of [new Response('',{status:503}),new Response('',{status:302,headers:{location:'https://untrusted.example/'}}),new Response('{}'),
     new Response('',{headers:{'content-length':'32769'}}),new Response('x'.repeat(32769))]){
     assert.equal(await collectSignedRagObservation({...args,registry:registry(entry),fetchImpl:async(url,init)=>{
-      assert.equal(url,entry.observer_url);assert.equal(init.redirect,'error');
+      assert.equal(url,entry.observer_url);assert.equal(init.redirect,'manual');
       assert.ok(init.signal);assert.equal(Object.keys(JSON.parse(init.body)).length,4);return response;
     }}),null);
   }

@@ -25,7 +25,9 @@ export async function collectSignedRagObservation({ registry, target, reportId, 
   });
   try {
     const res = await bounded(fetchImpl(entry.observer_url, {
-      method: 'POST', redirect: 'error', signal: controller.signal,
+      // Cloudflare supports manual/follow, not redirect:error. Manual plus
+      // the non-2xx rejection below forbids following observer redirects.
+      method: 'POST', redirect: 'manual', signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ challenge, target_id: target.id, report_uuid: reportId, job_id: jobId }),
     }));
