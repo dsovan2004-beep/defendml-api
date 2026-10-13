@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "build": {
+    "schema": 1,
+    "service": "defendml-api",
+    "sourceCommit": "43a7f6562322829bb98f37219579ea9d779794a7",
+    "workerSourceSHA256": "c2b4ebf616da6b0d0de26fd33be74e456d4a51bda597b7f07bf189ff62764d2c",
+    "lockSHA256": "12a129cd7207b0c68d4644627a1c4b82a946cdf6c8f3c40b718c66d49149fee4",
+    "toolchain": {
+      "node": "25.8.1",
+      "npm": "11.11.0",
+      "wrangler": "4.111.0",
+      "esbuild": "0.28.1"
+    },
+    "runtime": {
+      "compatibilityDate": "2025-01-01",
+      "compatibilityFlags": [
+        "global_fetch_strictly_public"
+      ]
+    },
+    "buildCommand": "npm run provenance:build",
+    "buildOptions": {
+      "entryPoints": [
+        "worker.js"
+      ],
+      "bundle": true,
+      "write": false,
+      "format": "esm",
+      "target": "es2022",
+      "keepNames": true,
+      "sourcemap": "linked",
+      "outfile": "dist/worker.js"
+    },
+    "artifact": {
+      "file": "worker.js",
+      "bytes": 262839,
+      "sha256": "92e4360e62dcdf542a9c8f8dbcc351b7662917f30e0b5640f97c76d91e668e3e"
+    }
+  },
+  "deployment": {
+    "versionId": "c14dbacc-dc2f-40ec-b15f-db674d71533d",
+    "deploymentId": "9e9fadd6-4932-420b-8417-e710986f0145",
+    "deployedAt": "2026-10-13T23:47:35.508583Z",
+    "operator": "Codex",
+    "kind": "code",
+    "artifactSHA256": "92e4360e62dcdf542a9c8f8dbcc351b7662917f30e0b5640f97c76d91e668e3e",
+    "compatibilityDate": "2025-01-01",
+    "compatibilityFlags": [
+      "global_fetch_strictly_public"
+    ],
+    "trafficPercent": 100
+  },
+  "verification": {
+    "verifiedAt": "2026-10-13T23:48:25.045Z",
+    "workerRootHTTP": 200,
+    "method": "Authenticated Cloudflare active-version metadata and independently hashed deployed module; operator-attested observation",
+    "scope": "Code artifact and public runtime metadata only; secret values are neither inspected nor certified"
+  }
+}
