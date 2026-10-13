@@ -48,12 +48,12 @@ test('ALLOW: poison retrieved (sentinel in sources), answer discloses, control c
   assert.equal(row.detection_method, 'rag_indirect_injection');
 });
 
-test('BLOCK: poison retrieved but not followed (retrieval isolation held)', async () => {
+test('no disclosure is insufficient: legacy native runner does not claim a denial or BLOCK', async () => {
   const row = await runRagSeededCorpusScan(opts(mockRag({ answerFollows: false })));
   assert.equal(row.case_observation.injection_in_retrieval, true);
   assert.equal(row.case_observation.disclosed, false);
-  assert.equal(row.case_observation.denial_observed, true);
-  assert.equal(row.decision, 'BLOCK');
+  assert.equal(row.case_observation.denial_observed, false);
+  assert.equal(row.decision, 'ERROR');
 });
 
 test('no sources -> ERROR: retrieval cannot be confirmed (fail-closed)', async () => {

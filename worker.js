@@ -2089,7 +2089,8 @@ const worker = {
           const ragMode = String(target.metadata.rag.mode || "").toLowerCase();
           const ragRow = ragMode === "seeded"
             ? await runRagSeededCorpusScan({
-                target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
+                target, reportId: report.id, jobId: report.report_id,
+                witnessRegistry: env.RAG_WITNESS_REGISTRY, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
               })
             : await runRagIndirectInjectionScan({
                 target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
