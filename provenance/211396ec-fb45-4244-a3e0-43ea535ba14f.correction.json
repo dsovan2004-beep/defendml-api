@@ -1,0 +1,14 @@
+{
+  "status": "INVALID_SUPERSEDED_ATTESTATION",
+  "versionId": "211396ec-fb45-4244-a3e0-43ea535ba14f",
+  "deploymentId": "5e79b262-3dd9-497e-967e-83e2676f0076",
+  "invalidReceipt": "211396ec-fb45-4244-a3e0-43ea535ba14f.json",
+  "claimedArtifactSHA256": "92e4360e62dcdf542a9c8f8dbcc351b7662917f30e0b5640f97c76d91e668e3e",
+  "observedArtifactSHA256": "3425cd76ca52179bf87990b82222ca143b85eba8a0b33bc46642dcaeb1322605",
+  "observedCodeSource": "e386c80f230bef009703ff7acd902b6782304cbb",
+  "cause": "A stale Cloudflare dashboard variable form redeployed its previously loaded module. A shell sequence incorrectly continued to receipt creation after independent module comparison failed.",
+  "scope": "No QA scans started during this version. New Pages canonical qualification rejected unsupported native-v1 protection; no historical rows were rewritten.",
+  "recoveryVersionId": "c14dbacc-dc2f-40ec-b15f-db674d71533d",
+  "recovery": "Reviewed Worker code reuploaded with --keep-vars. Recovery requires a separately verified artifact and receipt. Never use the invalid receipt as a configuration-only predecessor or release proof.",
+  "history": "Original erroneous receipt preserved; this additive correction controls its interpretation."
+}
