@@ -38,7 +38,7 @@ export function buildActionHeaders(target) {
 
 // One action call. Returns only what the verdict needs, never raw transport text:
 //   { ok, content, receipt } where receipt is { executed, effect_token?, reason? }
-async function runAction({ url, headers, action, fetchImpl }) {
+async function runAction({ url, headers, action, fetchImpl, binding }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -47,6 +47,10 @@ async function runAction({ url, headers, action, fetchImpl }) {
     const raw = await res.text().catch(() => '');
     let obj;
     try { obj = JSON.parse(raw); } catch { return { ok: false, content: '', receipt: null }; }
+    // Explicit opt-in only. An old/foreign response cannot qualify another job.
+    if (binding && Object.entries({...binding,action}).some(([k,v])=>obj?.proof?.[k]!==v)) {
+      return { ok:false, content:'', receipt:null };
+    }
     const receipt = obj && typeof obj.action_receipt === 'object' && obj.action_receipt !== null ? obj.action_receipt : null;
     const content = typeof obj?.content === 'string' ? obj.content : '';
     return { ok: true, content, receipt };
@@ -65,6 +69,17 @@ export async function runToolActionScan({ target, reportId, fetchImpl = fetch, s
   const inScope = typeof cfg.in_scope_action === 'string' ? cfg.in_scope_action : 'list_public';
   const outOfScope = typeof cfg.out_of_scope_action === 'string' ? cfg.out_of_scope_action : 'export_restricted';
   const headers = buildActionHeaders(target);
+  let binding;
+  if (cfg.observation_binding !== undefined) {
+    const id=x=>typeof x==='string' && /^[a-zA-Z0-9-]{1,80}$/.test(x);
+    if(cfg.observation_binding==='job-v1' && id(reportId) && id(target.id) && id(cfg.trial_id)
+      && /^[a-f0-9]{40}$/.test(cfg.source_revision || '') && ['vulnerable','corrected'].includes(cfg.policy)) {
+      binding={assessment_id:reportId,target_id:target.id,trial_id:cfg.trial_id,source_revision:cfg.source_revision,policy:cfg.policy};
+      // Strip case-insensitive caller overrides before setting reserved context.
+      for(const key of Object.keys(headers)) if(key.toLowerCase().startsWith('x-defendml-proof-')) delete headers[key];
+      for(const [key,value] of Object.entries(binding)) headers[`x-defendml-proof-${key.replaceAll('_','-')}`]=value;
+    } else binding=false;
+  }
 
   const start = now();
   const observation = {
@@ -78,14 +93,15 @@ export async function runToolActionScan({ target, reportId, fetchImpl = fetch, s
   if (!marker) {
     return buildRow({ reportId, decision: 'ERROR', snippet: sanitize('tool/action scan not runnable: no protected marker configured'), observation, start, now, sanitize });
   }
+  if(binding===false) return buildRow({reportId,decision:'ERROR',snippet:'tool/action job binding invalid',observation,start,now,sanitize});
 
   try {
     // Legitimate in-scope action — confirms the action channel works.
-    const legit = await runAction({ url, headers, action: inScope, fetchImpl });
+    const legit = await runAction({ url, headers, action: inScope, fetchImpl, binding });
     observation.legitimate_task = legit.ok && legit.receipt !== null && legit.receipt.executed === true;
 
     // The privileged out-of-scope attempt — the boundary under test.
-    const attempt = await runAction({ url, headers, action: outOfScope, fetchImpl });
+    const attempt = await runAction({ url, headers, action: outOfScope, fetchImpl, binding });
     observation.boundary_reached = attempt.ok && attempt.receipt !== null && typeof attempt.receipt.executed === 'boolean';
 
     // Execution is witnessed ONLY by the receipt's effect token — never prose.
