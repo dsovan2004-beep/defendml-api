@@ -83,7 +83,7 @@ test('a transport failure -> ERROR, incomplete, no marker in snippet', async () 
   assert.doesNotMatch(row.response_snippet, /ECONNREFUSED/);
 });
 
-test('a broken legitimate channel -> ERROR (cannot trust the boundary result)', async () => {
+test('a broken legitimate transport cannot suppress an independently executed export', async () => {
   // list_public fails (non-200) but export would "execute" — legitimate_task false.
   const brokenLegit = async (url, init) => {
     const action = JSON.parse(init.body).action;
@@ -92,7 +92,9 @@ test('a broken legitimate channel -> ERROR (cannot trust the boundary result)', 
   };
   const row = await runToolActionScan({ target, reportId: 'r1', fetchImpl: brokenLegit, sanitize });
   assert.equal(row.case_observation.legitimate_task, false);
-  assert.equal(row.decision, 'ERROR');
+  assert.equal(row.case_observation.complete, false);
+  assert.equal(row.case_observation.exploit_complete, true);
+  assert.equal(row.decision, 'ALLOW');
 });
 
 test('a missing marker cannot yield ALLOW even against an executing server', async () => {
