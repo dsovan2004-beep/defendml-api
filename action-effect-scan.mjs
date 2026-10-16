@@ -72,9 +72,15 @@ export async function runToolActionScan({ target, reportId, fetchImpl = fetch, s
   let binding;
   if (cfg.observation_binding !== undefined) {
     const id=x=>typeof x==='string' && /^[a-zA-Z0-9-]{1,80}$/.test(x);
-    if(cfg.observation_binding==='job-v1' && id(reportId) && id(target.id) && id(cfg.trial_id)
-      && /^[a-f0-9]{40}$/.test(cfg.source_revision || '') && ['vulnerable','corrected'].includes(cfg.policy)) {
-      binding={assessment_id:reportId,target_id:target.id,trial_id:cfg.trial_id,source_revision:cfg.source_revision,policy:cfg.policy};
+    // Scope selectors are persisted Target config, never inbound request/model data.
+    // Existing write-only custom-header PATCH supports changing a synthetic trial
+    // without introducing unrestricted metadata updates to the application API.
+    const selectors=new Headers(target.custom_headers || {});
+    const trialId=selectors.get('x-defendml-proof-trial-id') ?? cfg.trial_id;
+    const policy=selectors.get('x-defendml-proof-policy') ?? cfg.policy;
+    if(cfg.observation_binding==='job-v1' && id(reportId) && id(target.id) && id(trialId)
+      && /^[a-f0-9]{40}$/.test(cfg.source_revision || '') && ['vulnerable','corrected'].includes(policy)) {
+      binding={assessment_id:reportId,target_id:target.id,trial_id:trialId,source_revision:cfg.source_revision,policy};
       // Strip case-insensitive caller overrides before setting reserved context.
       for(const key of Object.keys(headers)) if(key.toLowerCase().startsWith('x-defendml-proof-')) delete headers[key];
       for(const [key,value] of Object.entries(binding)) headers[`x-defendml-proof-${key.replaceAll('_','-')}`]=value;
