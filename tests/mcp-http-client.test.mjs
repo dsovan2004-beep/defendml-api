@@ -52,9 +52,9 @@ test('rejects id mismatch, bad version, ambiguous, and malformed shapes', () => 
   assert.throws(() => validateJsonRpcResponse({ jsonrpc: '2.0', id: 5, error: { message: 'no code' } }, 5), McpProtocolError);
   assert.throws(() => validateJsonRpcResponse({ jsonrpc: '2.0', id: 5, result: 'not an object' }, 5), McpProtocolError);
 });
-test('a JSON-RPC error message is truncated and never trusted for length', () => {
+test('a JSON-RPC error message is never retained', () => {
   const out = validateJsonRpcResponse({ jsonrpc: '2.0', id: 1, error: { code: -1, message: 'x'.repeat(999) } }, 1);
-  assert.ok(out.error.message.length <= 200);
+  assert.equal(out.error.message, undefined);
 });
 
 // ── session, with an injected fetch ─────────────────────────────────────────
@@ -68,6 +68,12 @@ function scriptedFetch(steps) {
       status: 200, headers: { 'content-type': 'application/json' },
     });
   };
+}
+async function ready(steps) {
+  const s=createMcpHttpSession({url:'https://mcp.invalid',fetchImpl:scriptedFetch([
+    {result:{protocolVersion:MCP_PROTOCOL_VERSION,capabilities:{resources:{}}}},
+    ()=>new Response(null,{status:202}),...steps])});
+  await s.initialize();await s.notifyInitialized();return s;
 }
 
 test('initialize negotiates the exact protocol version', async () => {
@@ -90,37 +96,31 @@ test('an initialize JSON-RPC error is a protocol failure, not a scope denial', a
   await assert.rejects(() => s.initialize(), McpProtocolError);
 });
 test('readResource returns contents and decides disclosure via callback only', async () => {
-  const s = createMcpHttpSession({ url: 'https://mcp.invalid', fetchImpl: scriptedFetch([
-    { result: { contents: [{ uri: 'x', text: 'the secret is CANARY-123' }] } },
-  ]) });
+  const s = await ready([{ result: { contents: [{ uri: 'fixture://b/private', text: 'the secret is CANARY-123' }] } }]);
   const disclosed = await s.readResource('fixture://b/private', (t) => t.includes('CANARY-123'));
   assert.equal(disclosed.kind, 'contents');
   assert.equal(disclosed.disclosed, true);
-  const notDisclosed = createMcpHttpSession({ url: 'https://mcp.invalid', fetchImpl: scriptedFetch([
-    { result: { contents: [{ uri: 'x', text: 'access denied' }] } },
-  ]) });
+  const notDisclosed = await ready([{ result: { contents: [{ uri: 'fixture://b/private', text: 'access denied' }] } }]);
   const r2 = await notDisclosed.readResource('fixture://b/private', (t) => t.includes('CANARY-123'));
   assert.equal(r2.disclosed, false);
 });
-test('a resources/read JSON-RPC error is a clean observed scope denial', async () => {
-  const s = createMcpHttpSession({ url: 'https://mcp.invalid', fetchImpl: scriptedFetch([
-    { error: { code: -32001, message: 'Scope denied' } },
-  ]) });
+test('a resources/read JSON-RPC error is not a witnessed scope denial', async () => {
+  const s = await ready([{ error: { code: -32001, message: 'Scope denied' } }]);
   const out = await s.readResource('fixture://b/private', () => true);
-  assert.equal(out.kind, 'scope_denial');
+  assert.equal(out.kind, 'rpc_error');
   assert.equal(out.disclosed, false);
-  assert.equal(out.denial_observed, true);
+  assert.equal(out.denial_observed, false);
 });
 test('a non-2xx transport status is a protocol failure', async () => {
   const s = createMcpHttpSession({ url: 'https://mcp.invalid', fetchImpl: async () => new Response('nope', { status: 503 }) });
-  await assert.rejects(() => s.readResource('x', () => false), McpProtocolError);
+  await assert.rejects(() => s.initialize(), McpProtocolError);
 });
 test('a thrown fetch is a transport failure, never a verdict', async () => {
   const s = createMcpHttpSession({ url: 'https://mcp.invalid', fetchImpl: async () => { throw new Error('ECONNREFUSED'); } });
-  await assert.rejects(() => s.readResource('x', () => false), (e) => e instanceof McpProtocolError && e.kind === 'transport_failure');
+  await assert.rejects(() => s.initialize(), (e) => e instanceof McpProtocolError && e.kind === 'transport_failure');
 });
 test('the operation budget is bounded', async () => {
-  const s = createMcpHttpSession({ url: 'https://mcp.invalid', fetchImpl: scriptedFetch(Array(20).fill({ result: {} })) });
+  const s = await ready(Array(20).fill({ result: {resources:[]} }));
   await assert.rejects(async () => { for (let i = 0; i < 20; i += 1) await s.listResources(); }, McpProtocolError);
 });
 test('a closed session refuses further calls', async () => {
@@ -130,6 +130,6 @@ test('a closed session refuses further calls', async () => {
 });
 test('the raw upstream error text never surfaces verbatim on transport failure', async () => {
   const s = createMcpHttpSession({ url: 'https://mcp.invalid', fetchImpl: async () => { throw new Error('secret-internal-detail'); } });
-  try { await s.readResource('x', () => false); assert.fail('should throw'); }
+  try { await s.initialize(); assert.fail('should throw'); }
   catch (e) { assert.doesNotMatch(e.message, /secret-internal-detail/); }
 });

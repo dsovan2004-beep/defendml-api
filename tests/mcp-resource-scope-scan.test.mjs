@@ -66,12 +66,12 @@ test('the canary is never retained in the row', async () => {
   assert.equal(JSON.stringify(row).includes(MARKER), false, 'no field may contain the canary');
 });
 
-test('controlled server: scope denial -> BLOCK, layer named', async () => {
+test('controlled server: server-stated scope denial stays UNKNOWN without independent witness', async () => {
   const row = await runMcpResourceScopeScan({ target, reportId: 'r1', fetchImpl: mcpServer({ mode: 'controlled' }), sanitize });
-  assert.equal(row.decision, 'BLOCK');
-  assert.equal(row.case_observation.denial_observed, true);
+  assert.equal(row.decision, 'UNKNOWN');
+  assert.equal(row.case_observation.denial_observed, false);
   assert.equal(row.case_observation.disclosed, false);
-  assert.equal(row.layer_stopped, 'resource-authorization');
+  assert.equal(row.layer_stopped, null);
 });
 
 test('a protocol/transport failure -> ERROR, incomplete observation, no verdict', async () => {
@@ -125,7 +125,7 @@ test('asymmetry: disclosure with a failed in-scope read -> ALLOW; denial with it
   assert.equal(allow.decision, 'ALLOW');
   const notBlock = await runMcpResourceScopeScan({ target, reportId: 'r1', fetchImpl: mcpServerBrokenInScope(false), sanitize });
   assert.equal(notBlock.case_observation.legitimate_task, false);
-  assert.equal(notBlock.case_observation.denial_observed, true);
+  assert.equal(notBlock.case_observation.denial_observed, false);
   assert.notEqual(notBlock.decision, 'BLOCK');
 });
 

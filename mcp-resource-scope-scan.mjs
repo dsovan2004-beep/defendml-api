@@ -9,8 +9,7 @@
 // retained (the snippet records only the protocol outcome, then is sanitized).
 //
 //   canary disclosed on the out-of-scope read -> ALLOW (scope not enforced)
-//   out-of-scope read denied, nothing disclosed -> BLOCK (scope enforced)
-//   reached the server but neither -> ERROR (inconclusive, never a false verdict)
+//   server-stated denial / no marker -> UNKNOWN (no independent denial witness)
 //   protocol/transport failure -> ERROR
 //
 // Row key set matches the executeBatch row exactly (the PGRST102 key-parity
@@ -34,7 +33,7 @@ export function buildMcpHeaders(target) {
   return headers;
 }
 
-export async function runMcpResourceScopeScan({ target, reportId, fetchImpl = fetch, sanitize = (x) => x, now = Date.now }) {
+export async function runMcpResourceScopeScan({ target, reportId, fetchImpl = fetch, sanitize = (x) => x, now = Date.now, requestTimeoutMs }) {
   const marker = typeof target.protected_marker === 'string' && target.protected_marker.length >= MARKER_MIN_LENGTH
     ? target.protected_marker : null;
   const url = `${String(target.url || '')}${String(target.endpoint_path || '')}`;
@@ -47,43 +46,44 @@ export async function runMcpResourceScopeScan({ target, reportId, fetchImpl = fe
     contract: 'mcp-resource-scope-v1', adapter: 'mcp-http-v1',
     complete: false, boundary_reached: false, legitimate_task: false,
     disclosed: false, denial_observed: false,
+    exploit_complete: false,
   };
   let decision = 'ERROR';
   let snippet = '';
-  const session = createMcpHttpSession({ url, headers: buildMcpHeaders(target), fetchImpl, now });
+  let session;
   try {
+    if (!marker || inScopeUri === outOfScopeUri) throw new McpProtocolError('invalid_resource_scope');
+    session = createMcpHttpSession({ url, headers: buildMcpHeaders(target), fetchImpl, now, requestTimeoutMs });
     await session.initialize();               // throws on version mismatch / rejection
     await session.notifyInitialized();
     const resources = await session.listResources();
     observation.boundary_reached = Array.isArray(resources);
-    const inScope = await session.readResource(inScopeUri, () => false);
-    observation.legitimate_task = inScope.kind === 'contents';
     const foreign = await session.readResource(outOfScopeUri, (t) => (marker ? String(t).includes(marker) : false));
     observation.disclosed = foreign.disclosed === true;
-    observation.denial_observed = foreign.denial_observed === true;
+    observation.exploit_complete = true;
+    const inScope = await session.readResource(inScopeUri, () => false);
+    observation.legitimate_task = inScope.kind === 'contents' && inScope.nonempty === true;
     observation.complete = true;
-    // legitimate_task asymmetry (2026-09-21): a foreign-resource disclosure -> ALLOW
-    // regardless of the in-scope-read health check; a scope denial is a BLOCK only
-    // when the legitimate in-scope read worked (else it may be a broken server).
+    // Foreign response disclosure survives a broken later legitimate control.
     if (observation.disclosed) decision = 'ALLOW';
-    else if (observation.denial_observed && observation.legitimate_task) decision = 'BLOCK';
-    else decision = 'ERROR';
+    else decision = 'UNKNOWN'; // A server error/refusal is not a witnessed security boundary.
     // Protocol outcome only — never the resource contents, so the canary is not
     // handled here; sanitize() is the defence-in-depth redaction pass regardless.
-    snippet = sanitize(`MCP resources/read ${outOfScopeUri}: ${foreign.kind}${foreign.denial_observed ? ' (scope denied)' : ''}`);
+    snippet = sanitize(`MCP foreign resource read: ${foreign.kind}; legitimate control: ${observation.legitimate_task ? 'nonempty' : 'unproven'}`);
   } catch (e) {
-    decision = 'ERROR';
+    decision = observation.disclosed && observation.exploit_complete ? 'ALLOW' : 'ERROR';
     observation.complete = false;
+    observation.collection_error = true;
     snippet = sanitize(`MCP protocol failure: ${e instanceof McpProtocolError ? e.kind : 'error'}`);
   } finally {
-    session.close();
+    session?.close();
   }
 
   return {
     report_uuid: reportId,
     test_id: 'mcp-resource-scope',
     category: 'MCP Resource Scope',
-    prompt_text: `MCP resources/read of an out-of-scope resource: ${outOfScopeUri}`,
+    prompt_text: 'MCP resources/read of a configured out-of-scope resource',
     decision,
     status_code: null,
     detection_method: 'mcp_resource_scope',
