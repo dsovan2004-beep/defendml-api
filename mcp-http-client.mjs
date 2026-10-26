@@ -62,7 +62,9 @@ export function createMcpHttpSession({url,headers={},fetchImpl=fetch,now=Date.no
     const exchange=async()=>{
       const h=new Headers(baseHeaders);h.set('content-type','application/json');h.set('accept','application/json, text/event-stream');
       if(initialized)h.set('mcp-protocol-version',MCP_PROTOCOL_VERSION);
-      const res=await fetchImpl(url,{method:'POST',headers:Object.fromEntries(h),body:JSON.stringify(body),signal:controller.signal,redirect:'error'});
+      // Workers supports manual/follow, not redirect:error. Never follow an
+      // auth-bearing redirect: collect the 3xx and reject it below instead.
+      const res=await fetchImpl(url,{method:'POST',headers:Object.fromEntries(h),body:JSON.stringify(body),signal:controller.signal,redirect:'manual'});
       if(controller.signal.aborted)throw new McpProtocolError('deadline');
       if(notification){if(res?.status!==202){res?.body?.cancel?.().catch(()=>{});throw new McpProtocolError('notification_rejected');}
         res.body?.cancel?.().catch(()=>{});return null;}
