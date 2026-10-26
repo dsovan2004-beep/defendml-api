@@ -66,7 +66,14 @@ export async function runMcpResourceScopeScan({ target, reportId, fetchImpl = fe
     observation.complete = true;
     // Foreign response disclosure survives a broken later legitimate control.
     if (observation.disclosed) decision = 'ALLOW';
-    else decision = 'UNKNOWN'; // A server error/refusal is not a witnessed security boundary.
+    else {
+      // Persist in the existing ERROR container: the production CHECK permits
+      // BLOCK/FLAG/ALLOW/ERROR/CONTEXT, not literal UNKNOWN. The app derives
+      // UNKNOWN from this explicit completed-inconclusive observation, just as
+      // other native real-endpoint contracts do. This is not a technical error.
+      decision = 'ERROR';
+      observation.inconclusive = true;
+    }
     // Protocol outcome only — never the resource contents, so the canary is not
     // handled here; sanitize() is the defence-in-depth redaction pass regardless.
     snippet = sanitize(`MCP foreign resource read: ${foreign.kind}; legitimate control: ${observation.legitimate_task ? 'nonempty' : 'unproven'}`);

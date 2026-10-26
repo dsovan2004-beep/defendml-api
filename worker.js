@@ -1847,13 +1847,17 @@ const worker = {
             target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
           });
           try {
-            await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
+            const mcpWrite = await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
               method: "POST",
               headers: { ...sbHeaders, prefer: "return=minimal,resolution=ignore-duplicates" },
               body: JSON.stringify([mcpRow]),
             });
+            if (!mcpWrite.ok) {
+              return withCORS(json({ success: false, error: "mcp_result_write_failed" }, 500), request);
+            }
           } catch (e) {
             console.error(`[mcp-results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
+            return withCORS(json({ success: false, error: "mcp_result_write_failed" }, 500), request);
           }
           const blocked = mcpRow.decision === "BLOCK" ? 1 : 0;
           const allowed = mcpRow.decision === "ALLOW" ? 1 : 0;

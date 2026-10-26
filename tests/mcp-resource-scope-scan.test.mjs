@@ -68,7 +68,8 @@ test('the canary is never retained in the row', async () => {
 
 test('controlled server: server-stated scope denial stays UNKNOWN without independent witness', async () => {
   const row = await runMcpResourceScopeScan({ target, reportId: 'r1', fetchImpl: mcpServer({ mode: 'controlled' }), sanitize });
-  assert.equal(row.decision, 'UNKNOWN');
+  assert.equal(row.decision, 'ERROR'); // Persistable container; canonical outcome UNKNOWN.
+  assert.equal(row.case_observation.inconclusive, true);
   assert.equal(row.case_observation.denial_observed, false);
   assert.equal(row.case_observation.disclosed, false);
   assert.equal(row.layer_stopped, null);
@@ -137,4 +138,17 @@ test('the row key set matches the canonical persisted columns', async () => {
 test('auth header is built from the target (api_key -> raw value)', () => {
   const h = buildMcpHeaders(target);
   assert.equal(h['x-validation-token'], TOKEN);
+});
+
+test('actual MCP persistence branch fails closed on HTTP rejection or thrown write',async()=>{
+ const source=fs.readFileSync(new URL('../worker.js',import.meta.url),'utf8');
+ const start=source.indexOf('          try {',source.indexOf('const mcpRow = await runMcpResourceScopeScan'));
+ const end=source.indexOf('          const blocked =',start);
+ assert.ok(start>0&&end>start);
+ const run=new (Object.getPrototypeOf(async function(){}).constructor)('fetch','SB_URL','sbHeaders','mcpRow','withCORS','json','request','report','sanitizeTargetError','console',source.slice(start,end)+"return 'write_ok';");
+ const invoke=fetcher=>run(fetcher,'https://owned.invalid',{}, {decision:'ERROR'},x=>x,(b,s)=>Response.json(b,{status:s}),new Request('https://owned.invalid'),{id:'synthetic'},()=> 'sanitized',{error(){}});
+ assert.equal(await invoke(async()=>new Response(null,{status:201})),'write_ok');
+ for(const fetcher of [async()=>new Response(null,{status:400}),async()=>{throw Error('synthetic write failure');}]){
+  const result=await invoke(fetcher);assert.equal(result.status,500);assert.deepEqual(await result.json(),{success:false,error:'mcp_result_write_failed'});
+ }
 });
