@@ -57,10 +57,10 @@ for(const [family,prefix] of families){
     test(`${family}: result write ${mode} cannot complete report/Target`,async()=>{
       const db=fakeDatabase(mode);const {result}=await invoke(family,prefix,db.fetcher);
       assert.equal(result.status,500);assert.deepEqual(await result.json(),{success:false,error:`${family}_result_write_failed`});
-      assert.equal(db.requests.length,1,'no completion PATCH, Target PATCH, retry or deletion');
+      assert.equal(db.requests.length,1,'no completion PATCH, Target PATCH, retry or deletion within this extracted seam');
       assert.equal(db.retained.length,mode==='committed-then-threw'?1:0);
-      // Real sanitizer behavior is outside this injected seam; existing Worker
-      // redaction tests cover it. The fixed response above contains no raw error.
+      // Real sanitizer behavior is outside this injected seam. Existing redaction
+      // tests are separate; this assertion does not cover that inline wrapper.
     });
   }
   for(const status of [201,204])for(const decision of ['ALLOW','BLOCK','ERROR']){
