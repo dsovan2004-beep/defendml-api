@@ -1906,13 +1906,15 @@ const worker = {
             target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
           });
           try {
-            await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
+            const resultWrite = await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
               method: "POST",
               headers: { ...sbHeaders, prefer: "return=minimal,resolution=ignore-duplicates" },
               body: JSON.stringify([mtRow]),
             });
+            if (!resultWrite.ok) return withCORS(json({ success: false, error: "multiturn_result_write_failed" }, 500), request);
           } catch (e) {
             console.error(`[multiturn-results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
+            return withCORS(json({ success: false, error: "multiturn_result_write_failed" }, 500), request);
           }
           const blocked = mtRow.decision === "BLOCK" ? 1 : 0;
           const allowed = mtRow.decision === "ALLOW" ? 1 : 0;
@@ -1974,13 +1976,15 @@ const worker = {
                 target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
               });
           try {
-            await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
+            const resultWrite = await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
               method: "POST",
               headers: { ...sbHeaders, prefer: "return=minimal,resolution=ignore-duplicates" },
               body: JSON.stringify([actRow]),
             });
+            if (!resultWrite.ok) return withCORS(json({ success: false, error: "action_result_write_failed" }, 500), request);
           } catch (e) {
             console.error(`[action-results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
+            return withCORS(json({ success: false, error: "action_result_write_failed" }, 500), request);
           }
           const blocked = actRow.decision === "BLOCK" ? 1 : 0;
           const allowed = actRow.decision === "ALLOW" ? 1 : 0;
@@ -2037,13 +2041,15 @@ const worker = {
                 target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
               });
           try {
-            await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
+            const resultWrite = await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
               method: "POST",
               headers: { ...sbHeaders, prefer: "return=minimal,resolution=ignore-duplicates" },
               body: JSON.stringify([memRow]),
             });
+            if (!resultWrite.ok) return withCORS(json({ success: false, error: "memory_result_write_failed" }, 500), request);
           } catch (e) {
             console.error(`[memory-results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
+            return withCORS(json({ success: false, error: "memory_result_write_failed" }, 500), request);
           }
           const blocked = memRow.decision === "BLOCK" ? 1 : 0;
           const allowed = memRow.decision === "ALLOW" ? 1 : 0;
@@ -2100,13 +2106,15 @@ const worker = {
                 target, reportId: report.id, fetchImpl: fetch, sanitize: sanitizeTargetEvidence,
               });
           try {
-            await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
+            const resultWrite = await fetch(`${SB_URL}/rest/v1/red_team_results?on_conflict=report_uuid,test_id`, {
               method: "POST",
               headers: { ...sbHeaders, prefer: "return=minimal,resolution=ignore-duplicates" },
               body: JSON.stringify([ragRow]),
             });
+            if (!resultWrite.ok) return withCORS(json({ success: false, error: "rag_result_write_failed" }, 500), request);
           } catch (e) {
             console.error(`[rag-results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
+            return withCORS(json({ success: false, error: "rag_result_write_failed" }, 500), request);
           }
           const blocked = ragRow.decision === "BLOCK" ? 1 : 0;
           const allowed = ragRow.decision === "ALLOW" ? 1 : 0;
