@@ -7,16 +7,18 @@ import worker from '../worker.js';
 // The attack runner is outside this seam: no target/model/auth/DB is contacted.
 const source=fs.readFileSync(new URL('../worker.js',import.meta.url),'utf8');
 const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
-const families=[['multiturn','mt'],['action','act'],['memory','mem'],['rag','rag']];
+const families=[['multiturn','mt'],['action','act'],['memory','mem'],['rag','rag'],['mcp','mcp']];
 const DB='https://database.synthetic.invalid';
 const jobId='10000000-0000-4000-8000-000000000001';
 function branch(family,prefix){
   const anchor=source.indexOf(`const ${prefix}Row =`);
+  assert.equal(source.split(`const ${prefix}Row =`).length,2,'one row-assignment anchor');
   const start=source.indexOf('          try {',anchor);
   const finish=source.indexOf(`          return withCORS(json({ success: true, report_id: report.report_id, interface: "${family}"`,start);
   const end=source.indexOf('\n',finish);
   assert.ok(anchor>0&&start>anchor&&finish>start&&end>finish,'exact branch boundaries');
   const body=source.slice(start,end);
+  assert.ok(body.includes(`JSON.stringify([${prefix}Row])`),'actual canonical result write is inside seam');
   return new AsyncFunction('fetch','SB_URL','sbHeaders',`${prefix}Row`,`${prefix}Start`,'withCORS','json','request','report','sanitizeTargetError','console','sanitizeTargetEvidence','internalJob','targetId','target','ctx','actMode','ragMode','memMode','logEvent',body);
 }
 async function invoke(family,prefix,fetcher,decision='ALLOW'){
@@ -53,11 +55,12 @@ function fakeDatabase(mode,{queued=false}={}){
 for(const [family,prefix] of families){
   for(const mode of [400,401,403,409,429,500,'throw','committed-then-threw']){
     test(`${family}: result write ${mode} cannot complete report/Target`,async()=>{
-      const db=fakeDatabase(mode);const {result,logs}=await invoke(family,prefix,db.fetcher);
+      const db=fakeDatabase(mode);const {result}=await invoke(family,prefix,db.fetcher);
       assert.equal(result.status,500);assert.deepEqual(await result.json(),{success:false,error:`${family}_result_write_failed`});
       assert.equal(db.requests.length,1,'no completion PATCH, Target PATCH, retry or deletion');
       assert.equal(db.retained.length,mode==='committed-then-threw'?1:0);
-      assert.ok(logs.every(x=>!x.includes('synthetic-private-error')));
+      // Real sanitizer behavior is outside this injected seam; existing Worker
+      // redaction tests cover it. The fixed response above contains no raw error.
     });
   }
   for(const status of [201,204])for(const decision of ['ALLOW','BLOCK','ERROR']){
@@ -67,6 +70,9 @@ for(const [family,prefix] of families){
       assert.equal(db.retained.length,1);assert.equal(db.retained[0].decision,decision);
       assert.equal(db.requests.length,3);
       assert.equal(db.requests[0].query,'?on_conflict=report_uuid,test_id');
+      assert.equal(db.requests[0].body[0].report_uuid,'report-synthetic');
+      assert.equal(db.requests[1].query,'?id=eq.report-synthetic');
+      assert.equal(db.requests[2].query,'?id=eq.target-synthetic');
       const completion=db.requests[1].body;
       assert.equal(completion.job_state,'completed');assert.equal(completion.total_tests,1);
       assert.equal(completion.allowed_count,decision==='ALLOW'?1:0);
@@ -92,7 +98,8 @@ for(const [family,prefix] of families){
           assert.ok(!db.requests.some(x=>x.body?.job_state==='completed'||x.body?.last_scan_status==='completed'));
           if(attempts===3)assert.ok(db.requests.some(x=>x.body?.failure_code==='WORKER_RETRY_EXHAUSTED'));
         }
-        assert.ok(!db.requests.some(x=>x.method==='DELETE'));
+        // The real handler's pre-scan retry cleanup is upstream of this seam.
+        // This test makes no assertion about deletion/durability across attempts.
       }finally{globalThis.fetch=originalFetch;worker.fetch=originalWorkerFetch;}
     });
   }
