@@ -2915,13 +2915,8 @@ const worker = {
         console.log(`[swarm] ════════════════════════════════════════════`);
 
         // ── Bulk-insert results ─────────────────────────────────────────────────
-        // Fix #252 (2026-04-27): writes have been silently failing since April 2.
-        // V1 of this patch logged to console.log only; wrangler tail couldn't
-        // capture it (possibly Workers Logs not enabled in CF dashboard).
-        // V2: capture the diagnostic into a `resultsWriteDiagnostic` variable
-        // so it can be embedded in the report's `attack_intelligence` JSON
-        // during the post-scan PATCH. That way the silent-failure cause is
-        // readable via Supabase, no terminal needed.
+        // Keep success/empty diagnostics for completed reports. A rejected or
+        // thrown result write must stop before completion or derived memory.
         let resultsWriteDiagnostic = null;
         if (persistedResults.length > 0) {
           try {
@@ -2956,36 +2951,12 @@ const worker = {
               };
               console.log(`[results-write-ok] inserted ${persistedResults.length} rows for report=${report.id}`);
             } else {
-              const errBody = sanitizeTargetEvidence(await insertRes.text().catch(() => "<failed to read body>"));
-              const sampleKeys = persistedResults[0] ? Object.keys(persistedResults[0]).join(",") : "<empty>";
-              const sampleRow = persistedResults[0] || null;
-              resultsWriteDiagnostic = {
-                status: "FAIL",
-                http_status: insertRes.status,
-                count: persistedResults.length,
-                body_first_500: errBody.slice(0, 500),
-                sample_row_keys: sampleKeys,
-                sample_row_first: sampleRow ? {
-                  report_uuid: sampleRow.report_uuid,
-                  test_id: sampleRow.test_id,
-                  category: sampleRow.category,
-                  decision: sampleRow.decision,
-                  prompt_text_len: typeof sampleRow.prompt_text === 'string' ? sampleRow.prompt_text.length : null,
-                  response_snippet_len: typeof sampleRow.response_snippet === 'string' ? sampleRow.response_snippet.length : null,
-                } : null,
-                body_size_bytes: JSON.stringify(persistedResults).length,
-              };
-              console.error(`[results-write-FAIL] report=${report.id} status=${insertRes.status} count=${persistedResults.length} body=${errBody.slice(0, 500)}`);
-              console.error(`[results-write-FAIL] sample-row-keys=${sampleKeys}`);
+              console.error(`[results-write-FAIL] report=${report.id} status=${insertRes.status} count=${persistedResults.length}`);
+              return withCORS(json({ success: false, error: "swarm_result_write_failed" }, 500), request);
             }
           } catch (e) {
-            resultsWriteDiagnostic = {
-              status: "THREW",
-              error_message: sanitizeTargetError(e),
-              error_name: e && e.name ? e.name : null,
-              count: persistedResults.length,
-            };
             console.error(`[results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
+            return withCORS(json({ success: false, error: "swarm_result_write_failed" }, 500), request);
           }
         } else {
           resultsWriteDiagnostic = { status: "skipped", reason: "results.length === 0" };
@@ -3057,9 +3028,8 @@ const worker = {
           flaggedCount: flagged,
           blockRate,
           generatedAt: new Date().toISOString(),
-          // Fix #252 V2 (2026-04-27): bulk-INSERT diagnostic readable via Supabase
-          // (no wrangler tail needed). Look for { status: "FAIL", body_first_500 }
-          // in red_team_reports.attack_intelligence.results_write_diagnostic.
+          // Failed writes return a technical error above, never a completed
+          // report carrying a diagnostic in place of retained result evidence.
           results_write_diagnostic: resultsWriteDiagnostic,
         };
 
