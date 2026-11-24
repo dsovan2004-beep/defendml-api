@@ -2952,7 +2952,10 @@ const worker = {
               console.log(`[results-write-ok] inserted ${persistedResults.length} rows for report=${report.id}`);
             } else {
               console.error(`[results-write-FAIL] report=${report.id} status=${insertRes.status} count=${persistedResults.length}`);
-              return withCORS(json({ success: false, error: "swarm_result_write_failed" }, 500), request);
+              // Do not mark thrown/ambiguous writes or copy upstream headers.
+              const retryHeaders = internalJob && [400, 413, 415, 422].includes(insertRes.status)
+                ? { "x-defendml-result-storage": "rejected-no-retry" } : {};
+              return withCORS(json({ success: false, error: "swarm_result_write_failed" }, 500, retryHeaders), request);
             }
           } catch (e) {
             console.error(`[results-write-THREW] report=${report.id} err=${sanitizeTargetError(e)}`);
@@ -3370,6 +3373,41 @@ const worker = {
           await fetch(`${env.SUPABASE_URL}/rest/v1/targets?id=eq.${encodeURIComponent(job.target_id)}`, { method: "PATCH", headers, body: JSON.stringify({ last_scan_status: "failed" }) });
           message.ack();
           continue;
+        }
+        if (response.status === 500 && response.headers.get("x-defendml-result-storage") === "rejected-no-retry") {
+          // Response comes from authenticated internal worker.fetch, not the Target.
+          // Suppress execution retries only after verified terminal persistence.
+          // Outages retain the existing bounded fallback and its known limitations.
+          const matchingTerminal = row => row && row.report_id === jobId &&
+            row.target_id === job.target_id && ["failed", "completed"].includes(row.job_state);
+          let terminal = null;
+          try {
+            const stopped = await patchJob(jobId, "running", {
+              job_state: "failed", failed_at: new Date().toISOString(), failure_code: "RESULT_STORAGE_REJECTED",
+            });
+            const rows = await stopped.json().catch(() => null);
+            if (stopped.ok && Array.isArray(rows) && rows.length === 1 &&
+                matchingTerminal(rows[0]) && rows[0].job_state === "failed" &&
+                rows[0].failure_code === "RESULT_STORAGE_REJECTED") terminal = rows[0];
+          } catch (_) { /* An ambiguous commit requires one reread. */ }
+          if (!terminal) {
+            try {
+              const reread = await fetch(`${env.SUPABASE_URL}/rest/v1/red_team_reports?report_id=eq.${encodeURIComponent(jobId)}&select=report_id,target_id,job_state&limit=1`, { headers });
+              const rows = await reread.json().catch(() => null);
+              if (reread.ok && Array.isArray(rows) && rows.length === 1 && matchingTerminal(rows[0])) terminal = rows[0];
+            } catch (_) { /* UNKNOWN is not terminal confirmation. */ }
+          }
+          if (terminal) {
+            if (terminal.job_state === "failed") {
+              try {
+                await fetch(`${env.SUPABASE_URL}/rest/v1/targets?id=eq.${encodeURIComponent(job.target_id)}`, {
+                  method: "PATCH", headers, body: JSON.stringify({ last_scan_status: "failed" }),
+                });
+              } catch (_) { /* Secondary Target failure must not repeat attacks. */ }
+            }
+            message.ack();
+            continue;
+          }
         }
         throw new Error("worker_execution_failed");
       } catch (_) {

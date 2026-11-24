@@ -57,9 +57,9 @@ function database(mode, queued = false) {
       return response;
     }
     if (u.pathname === '/rest/v1/red_team_reports') {
-      if (method === 'GET') return Response.json([{job_state:state,target_id:TARGET}]);
+      if (method === 'GET') return Response.json([{report_id:JOB,job_state:state,target_id:TARGET}]);
       assert.equal(method,'PATCH'); state = body.job_state || state;
-      return Response.json([{target_id:TARGET,job_state:state}]);
+      return Response.json([{report_id:JOB,target_id:TARGET,job_state:state,...body}]);
     }
     if (u.pathname === '/rest/v1/targets' && method === 'PATCH') return new Response(null,{status:204});
     if (u.pathname === '/rest/v1/target_memory') {
@@ -75,7 +75,7 @@ async function invoke(db, input = rows(), internalJob = true) {
   const values = { fetch:db.fetcher,results:input,SB_URL:DB,sbHeaders:{'content-type':'application/json'},
     report:{id:REPORT,report_id:JOB},targetId:TARGET,target,scanStart:Date.now(),
     sanitizeTargetEvidence:sanitize,sanitizeTargetError:e=>sanitize(String(e)).slice(0,500),
-    withCORS:r=>r,json:(body,status=200)=>Response.json(body,{status}),
+    withCORS:r=>r,json:(body,status=200,headers={})=>Response.json(body,{status,headers}),
     request:new Request('https://request.synthetic.invalid'),internalJob,
     ctx:{waitUntil:p=>waits.push(p)},console:{log:x=>logs.push(x),error:x=>logs.push(x)},
     logEvent:async e=>events.push(e),toCanonical:x=>x,qualifiesMemoryOutcome,isQualifiedMemory,
@@ -88,6 +88,17 @@ async function invoke(db, input = rows(), internalJob = true) {
   return {response,logs,events};
 }
 const failures = [400,401,403,409,429,500,'throw','committed-then-threw','unreadable-body'];
+for (const mode of [400,413,415,422,401,403,404,405,408,409,425,429,500,'throw','committed-then-threw']) {
+  for (const internal of [true,false]) test(`swarm retry marker ${mode} internal=${internal}`,async()=>{
+    const db=database(mode); const {response}=await invoke(db,rows(),internal);
+    assert.equal(response.status,500);
+    assert.deepEqual(await response.json(),{success:false,error:'swarm_result_write_failed'});
+    assert.equal(response.headers.get('x-defendml-result-storage'),
+      internal&&[400,413,415,422].includes(mode)?'rejected-no-retry':null);
+    assert.equal(db.bodyReads(),0); assert.equal(db.requests.length,1);
+    assert.equal(db.retained.length,mode==='committed-then-threw'?5:0);
+  });
+}
 for (const mode of failures) test(`swarm: ${mode} cannot complete or update Target/memory`,async()=>{
   const db=database(mode); const {response,logs,events}=await invoke(db);
   assert.equal(response.status,500);
@@ -136,12 +147,13 @@ for (const mode of [400,'throw','committed-then-threw',201]) for (const attempts
     try {
       await worker.queue({messages:[{body:{jobId:JOB},attempts,ack(){ack++;},retry(){retry++;}}]},
         {SUPABASE_URL:DB,SUPABASE_SERVICE_ROLE_KEY:'synthetic-local-key',SCAN_JOB_INTERNAL_TOKEN:'synthetic-local-token'},{});
-      const success=mode===201;
+      const success=mode===201, permanent=mode===400;
       assert.equal(executions,1);
-      assert.equal(db.state(),success?'completed':attempts===1?'queued':'failed');
-      assert.equal(ack,success||attempts===3?1:0); assert.equal(retry,!success&&attempts===1?1:0);
+      assert.equal(db.state(),success?'completed':permanent?'failed':attempts===1?'queued':'failed');
+      assert.equal(ack,success||permanent||attempts===3?1:0); assert.equal(retry,!success&&!permanent&&attempts===1?1:0);
       if (!success) assert.ok(!db.requests.some(r=>r.body?.job_state==='completed'||r.body?.last_scan_status==='completed'));
-      if (!success&&attempts===3) assert.ok(db.requests.some(r=>r.body?.failure_code==='WORKER_RETRY_EXHAUSTED'));
+      if (permanent) assert.ok(db.requests.some(r=>r.body?.failure_code==='RESULT_STORAGE_REJECTED'));
+      if (!success&&!permanent&&attempts===3) assert.ok(db.requests.some(r=>r.body?.failure_code==='WORKER_RETRY_EXHAUSTED'));
       // Full handler/attack execution and pre-scan retry cleanup are outside the
       // injected queue seam. This is not across-retry durability or live RLS proof.
     } finally {globalThis.fetch=originalFetch;worker.fetch=originalWorkerFetch;}

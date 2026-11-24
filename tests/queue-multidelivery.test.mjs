@@ -13,7 +13,7 @@ const env = { SUPABASE_URL:ORIGIN, SUPABASE_SERVICE_ROLE_KEY:'synthetic-only',
   SCAN_JOB_INTERNAL_TOKEN:'synthetic-only' };
 
 async function scenario(options, run) {
-  let job = {job_state:options.state || 'queued',target_id:TARGET,
+  let job = {report_id:JOB,job_state:options.state || 'queued',target_id:TARGET,
     job_started_at:options.startedAt || null};
   let now=NOW, executions=0, terminalWrites=0, targetState='idle';
   const requests=[], deliveries=[];
@@ -31,6 +31,10 @@ async function scenario(options, run) {
     if (u.pathname==='/rest/v1/red_team_reports') {
       assert.equal(u.searchParams.get('report_id'),`eq.${JOB}`);
       if (method==='GET') {
+        if(terminalWrites && options.reread==='reject') return Response.json({error:'synthetic'},{status:503});
+        if(terminalWrites && options.reread==='empty') return Response.json([]);
+        if(terminalWrites && options.reread==='non-array') return Response.json({error:'synthetic'});
+        if(terminalWrites && options.reread==='completed') job={...job,job_state:'completed'};
         if(options.lookup==='reject') return Response.json({error:'synthetic'},{status:503});
         if(options.lookup==='non-array') return Response.json({error:'synthetic'});
         return Response.json([structuredClone(job)]);
@@ -41,6 +45,8 @@ async function scenario(options, run) {
       if(options.claimMiss && expected==='queued') return Response.json([]);
       if (body.job_state==='failed') {
         terminalWrites++;
+        if (options.terminal==='zero-running') return Response.json([]);
+        if (options.terminal==='wrong-identity') return Response.json([{...job,report_id:'wrong-job',job_state:'failed'}]);
         if (options.terminal==='reject') return new Response(null,{status:503});
         if (options.terminal==='throw') throw Error('synthetic terminal failure');
         if (options.terminal==='race-queued') {
@@ -69,7 +75,7 @@ async function scenario(options, run) {
     assert.deepEqual(await request.json(),{jobId:JOB,targetId:TARGET});
     if (options.complete) job={...job,job_state:'completed'};
     return Response.json({success:!!options.complete,error:options.complete?undefined:'synthetic_failure'},
-      {status:options.status || 500});
+      {status:options.status || 500,headers:options.marker===undefined?{}:{'x-defendml-result-storage':options.marker}});
   };
   const api={
     get job(){return structuredClone(job);}, get executions(){return executions;},
@@ -164,3 +170,46 @@ for(const [status,code] of [[409,'TARGET_INACTIVE'],[429,'WORKER_REJECTED']]) te
   await s.deliver(1); assert.equal(s.executions,1); assert.equal(s.job.job_state,'failed');
   assert.equal(s.job.failure_code,code); assert.equal(s.deliveries[0].ack,1);
 }));
+
+const MARKER='rejected-no-retry';
+test('correction: marked500 confirms failure and redelivery executes no new handler',async()=>scenario({marker:MARKER},async s=>{
+  await s.deliver(1); await s.deliver(2);
+  assert.equal(s.executions,1); assert.equal(s.job.job_state,'failed');
+  assert.equal(s.job.failure_code,'RESULT_STORAGE_REJECTED'); assert.equal(s.targetState,'failed');
+  assert.ok(s.deliveries.every(d=>d.ack===1&&d.retry===0));
+  assert.equal(s.requests.filter(r=>r.method==='GET').length,2,'no reread after confirmed PATCH');
+}));
+test('correction: ambiguous terminal commit is confirmed by one reread',async()=>scenario({marker:MARKER,terminal:'commit-then-throw'},async s=>{
+  await s.deliver(1); assert.equal(s.executions,1); assert.equal(s.job.job_state,'failed');
+  assert.equal(s.deliveries[0].ack,1); assert.equal(s.deliveries[0].retry,0);
+  assert.equal(s.requests.filter(r=>r.method==='GET').length,2);
+}));
+test('correction: Target failure after confirmed Report does not schedule retry',async()=>scenario({marker:MARKER,targetThrows:true},async s=>{
+  await s.deliver(1); await s.deliver(2); assert.equal(s.executions,1);
+  assert.equal(s.job.job_state,'failed'); assert.equal(s.targetState,'running');
+  assert.ok(s.deliveries.every(d=>d.ack===1&&d.retry===0));
+}));
+for(const terminal of ['reject','throw','race-queued','zero-running','wrong-identity']) {
+  test(`correction: unconfirmed ${terminal} retains bounded fallback, not no-rerun guarantee`,async()=>scenario({marker:MARKER,terminal},async s=>{
+    await s.deliver(1); assert.equal(s.job.job_state,'queued');
+    assert.equal(s.deliveries[0].ack,0); assert.deepEqual(s.deliveries[0].delays,[15]);
+    assert.equal(s.requests.filter(r=>r.method==='GET').length,2,'only one confirmation reread');
+    await s.deliver(2); assert.equal(s.executions,2,'outage fallback may re-execute');
+  }));
+}
+for(const reread of ['reject','empty','non-array']) {
+  test(`correction: ${reread} confirmation is UNKNOWN, not terminal closure`,async()=>scenario({marker:MARKER,terminal:'zero-running',reread},async s=>{
+    await s.deliver(1); assert.equal(s.deliveries[0].ack,0); assert.equal(s.deliveries[0].retry,1);
+    assert.equal(s.job.job_state,'queued');
+  }));
+}
+test('correction: already-completed reread does not overwrite Target as failed',async()=>scenario({marker:MARKER,terminal:'zero-running',reread:'completed'},async s=>{
+  await s.deliver(1); assert.equal(s.job.job_state,'completed'); assert.equal(s.targetState,'running');
+  assert.equal(s.deliveries[0].ack,1); assert.equal(s.deliveries[0].retry,0);
+  assert.ok(!s.requests.some(r=>r.body?.last_scan_status==='failed'));
+}));
+for(const [status,marker] of [[500,'invalid'],[503,MARKER],[200,MARKER]]) {
+  test(`correction: marker/status mismatch ${status}/${marker} cannot select new failure code`,async()=>scenario({status,marker},async s=>{
+    await s.deliver(1); assert.ok(!s.requests.some(r=>r.body?.failure_code==='RESULT_STORAGE_REJECTED'));
+  }));
+}
