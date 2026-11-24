@@ -15,9 +15,14 @@ const env = { SUPABASE_URL:ORIGIN, SUPABASE_SERVICE_ROLE_KEY:'synthetic-only',
 async function scenario(options, run) {
   let job = {job_state:options.state || 'queued',target_id:TARGET,
     job_started_at:options.startedAt || null};
-  let now=NOW, executions=0, terminalWrites=0;
+  let now=NOW, executions=0, terminalWrites=0, targetState='idle';
   const requests=[], deliveries=[];
-  const oldFetch=globalThis.fetch, oldHandler=worker.fetch, oldNow=Date.now;
+  const oldFetch=globalThis.fetch, oldHandler=worker.fetch, OldDate=Date;
+  // Top-level node:test cases are sequential; never enable file concurrency.
+  globalThis.Date=class extends OldDate {
+    constructor(...args){super(...(args.length?args:[now]));}
+    static now(){return now;}
+  };
   globalThis.fetch=async(input,init={})=>{
     const u=new URL(String(input)), method=init.method || 'GET';
     assert.equal(u.origin,ORIGIN,'external network forbidden');
@@ -25,10 +30,15 @@ async function scenario(options, run) {
     requests.push({path:u.pathname,query:u.search,method,body});
     if (u.pathname==='/rest/v1/red_team_reports') {
       assert.equal(u.searchParams.get('report_id'),`eq.${JOB}`);
-      if (method==='GET') return Response.json([structuredClone(job)]);
+      if (method==='GET') {
+        if(options.lookup==='reject') return Response.json({error:'synthetic'},{status:503});
+        if(options.lookup==='non-array') return Response.json({error:'synthetic'});
+        return Response.json([structuredClone(job)]);
+      }
       assert.equal(method,'PATCH');
       const expected=u.searchParams.get('job_state')?.slice(3);
       assert.ok(['queued','running'].includes(expected),'conditional transition required');
+      if(options.claimMiss && expected==='queued') return Response.json([]);
       if (body.job_state==='failed') {
         terminalWrites++;
         if (options.terminal==='reject') return new Response(null,{status:503});
@@ -49,6 +59,7 @@ async function scenario(options, run) {
     assert.equal(method,'PATCH');
     assert.equal(u.searchParams.get('id'),`eq.${TARGET}`);
     if (body.last_scan_status==='failed' && options.targetThrows) throw Error('synthetic Target failure');
+    targetState=body.last_scan_status;
     return new Response(null,{status:204});
   };
   worker.fetch=async(request)=>{
@@ -60,10 +71,10 @@ async function scenario(options, run) {
     return Response.json({success:!!options.complete,error:options.complete?undefined:'synthetic_failure'},
       {status:options.status || 500});
   };
-  Date.now=()=>now;
   const api={
     get job(){return structuredClone(job);}, get executions(){return executions;},
     get terminalWrites(){return terminalWrites;}, requests,deliveries,
+    get targetState(){return targetState;},
     async deliver(attempts,ageMinutes=0){
       now=NOW+ageMinutes*60000;
       const receipt={attempts,ack:0,retry:0,delays:[]}; deliveries.push(receipt);
@@ -72,7 +83,7 @@ async function scenario(options, run) {
       return receipt;
     },
   };
-  try {await run(api);} finally {globalThis.fetch=oldFetch;worker.fetch=oldHandler;Date.now=oldNow;}
+  try {await run(api);} finally {globalThis.fetch=oldFetch;worker.fetch=oldHandler;globalThis.Date=OldDate;}
 }
 
 test('baseline generic500 invokes handler three times across actual deliveries',async()=>scenario({},async s=>{
@@ -80,16 +91,22 @@ test('baseline generic500 invokes handler three times across actual deliveries',
   assert.equal(s.executions,3); assert.equal(s.job.job_state,'failed');
   assert.equal(s.job.failure_code,'WORKER_RETRY_EXHAUSTED');
   assert.deepEqual(s.deliveries.map(d=>[d.ack,d.retry]),[[0,1],[0,1],[1,0]]);
+  assert.deepEqual(s.deliveries.map(d=>d.delays),[[15],[30],[]]);
+  assert.deepEqual(s.requests.slice(0,4).map(r=>[r.method,r.path]),[
+    ['GET','/rest/v1/red_team_reports'],['PATCH','/rest/v1/red_team_reports'],
+    ['PATCH','/rest/v1/targets'],['PATCH','/rest/v1/red_team_reports']]);
 }));
 test('baseline4xx confirmed terminal write prevents repeat handler invocation',async()=>scenario({status:422},async s=>{
   await s.deliver(1); await s.deliver(2);
   assert.equal(s.executions,1); assert.equal(s.job.job_state,'failed');
   assert.equal(s.job.failure_code,'INVALID_TARGET');
+  assert.equal(s.targetState,'failed');
   assert.ok(s.deliveries.every(d=>d.ack===1&&d.retry===0));
 }));
 test('baseline rejected terminal PATCH is acknowledged while job still running',async()=>scenario({status:422,terminal:'reject'},async s=>{
   const first=await s.deliver(1);
   assert.equal(first.ack,1); assert.equal(first.retry,0); assert.equal(s.job.job_state,'running');
+  assert.equal(s.job.job_started_at,new Date(NOW).toISOString(),'same clock for claim and age');
   await s.deliver(2); assert.equal(s.executions,1); assert.equal(s.deliveries[1].ack,1);
 }));
 test('baseline thrown terminal PATCH requeues and executes all three attempts',async()=>scenario({status:422,terminal:'throw'},async s=>{
@@ -103,12 +120,14 @@ test('baseline ambiguous committed terminal PATCH does not reset failed job',asy
 }));
 test('baseline zero-row raced-to-queued terminal write can ack queued job',async()=>scenario({status:422,terminal:'race-queued'},async s=>{
   await s.deliver(1); assert.equal(s.job.job_state,'queued'); assert.equal(s.deliveries[0].ack,1);
+  assert.equal(s.targetState,'failed','baseline Target can disagree with queued Report');
   await s.deliver(2); assert.equal(s.executions,2);
 }));
 test('baseline Target failure after terminal commit does not re-execute handler',async()=>scenario({status:422,targetThrows:true},async s=>{
   await s.deliver(1); await s.deliver(2);
   assert.equal(s.executions,1); assert.equal(s.job.job_state,'failed');
   assert.equal(s.deliveries[0].retry,1); assert.equal(s.deliveries[1].ack,1);
+  assert.equal(s.targetState,'running','baseline Target can remain stale after failed Report');
 }));
 test('baseline recent-running delivery acks without verified terminal state',async()=>scenario({state:'running',startedAt:new Date(NOW).toISOString()},async s=>{
   await s.deliver(2,1); assert.equal(s.executions,0); assert.equal(s.job.job_state,'running');
@@ -121,4 +140,27 @@ test('baseline delayed running delivery requeues then invokes handler',async()=>
 test('completed success redelivery invokes handler only once',async()=>scenario({status:200,complete:true},async s=>{
   await s.deliver(1); await s.deliver(2); assert.equal(s.executions,1);
   assert.equal(s.job.job_state,'completed'); assert.equal(s.terminalWrites,0);
+  assert.deepEqual(s.requests.map(r=>[r.method,r.path]),[
+    ['GET','/rest/v1/red_team_reports'],['PATCH','/rest/v1/red_team_reports'],
+    ['PATCH','/rest/v1/targets'],['GET','/rest/v1/red_team_reports']]);
+}));
+for(const lookup of ['reject','non-array']) test(`baseline ${lookup} lookup acknowledges queued job without execution`,async()=>scenario({lookup},async s=>{
+  await s.deliver(1); assert.equal(s.executions,0); assert.equal(s.job.job_state,'queued');
+  assert.equal(s.deliveries[0].ack,1); assert.equal(s.requests.length,1);
+}));
+for(const attempts of [1,3]) test(`baseline claim-miss attempt${attempts} retries without terminalizing`,async()=>scenario({claimMiss:true},async s=>{
+  await s.deliver(attempts); assert.equal(s.executions,0); assert.equal(s.job.job_state,'queued');
+  assert.equal(s.deliveries[0].ack,0); assert.deepEqual(s.deliveries[0].delays,[5]);
+}));
+test('baseline stale reclaim attempt3 retries queued state, not terminal',async()=>scenario({state:'running',startedAt:new Date(NOW).toISOString()},async s=>{
+  await s.deliver(3,16); assert.equal(s.executions,0); assert.equal(s.job.job_state,'queued');
+  assert.deepEqual(s.deliveries[0].delays,[5]); assert.equal(s.deliveries[0].ack,0);
+}));
+test('baseline future-dated running job also receives nonterminal ack',async()=>scenario({state:'running',startedAt:new Date(NOW+60000).toISOString()},async s=>{
+  await s.deliver(1); assert.equal(s.executions,0); assert.equal(s.job.job_state,'running');
+  assert.equal(s.deliveries[0].ack,1);
+}));
+for(const [status,code] of [[409,'TARGET_INACTIVE'],[429,'WORKER_REJECTED']]) test(`baseline internal${status} terminal mapping`,async()=>scenario({status},async s=>{
+  await s.deliver(1); assert.equal(s.executions,1); assert.equal(s.job.job_state,'failed');
+  assert.equal(s.job.failure_code,code); assert.equal(s.deliveries[0].ack,1);
 }));
