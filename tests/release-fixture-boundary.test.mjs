@@ -40,7 +40,8 @@ test('held non-fixture queued job is never claimed, modified or acknowledged', a
     assert.equal(init.method, undefined);
     assert.match(String(url), /red_team_reports\?/);
     reads++;
-    return Response.json([{ job_state: 'queued', target_id: foreign }]);
+    const jobId=new URL(String(url)).searchParams.get('report_id').slice(3);
+    return Response.json([{ report_id:jobId, job_state: 'queued', target_id: foreign }]);
   });
   await worker.queue({ messages: [{ body: { jobId: crypto.randomUUID() }, attempts: 999,
     retry() { retries++; }, ack() { throw new Error('Pending job acknowledged'); },

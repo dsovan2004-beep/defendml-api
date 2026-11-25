@@ -43,7 +43,7 @@ function fakeDatabase(mode,{queued=false}={}){
       retained.push(...structuredClone(body));return new Response(null,{status:mode});
     }
     if(url.pathname==='/rest/v1/red_team_reports'){
-      if(method==='GET')return Response.json([{job_state:state,target_id:'target-synthetic'}]);
+      if(method==='GET')return Response.json([{report_id:jobId,job_state:state,target_id:'target-synthetic'}]);
       assert.equal(method,'PATCH');state=body.job_state||state;
       return Response.json([{target_id:'target-synthetic',job_state:state}]);
     }
