@@ -59,7 +59,8 @@ for (const failure of ['throw', 'http-error', 'invalid-json', 'missing-job', 'mi
       if (failure === 'http-error') return Response.json([{ target_id: a }], { status: 503 });
       if (failure === 'invalid-json') return new Response('{');
       if (failure === 'missing-job') return Response.json([]);
-      return Response.json([{ job_state: 'queued' }]);
+      const jobId=new URL(String(url)).searchParams.get('report_id').slice(3);
+      return Response.json([{ report_id:jobId, job_state: 'queued' }]);
     });
     await worker.queue({ messages: [{ body: { jobId: crypto.randomUUID() }, attempts: 999,
       retry() { retries++; }, ack() { throw new Error('Unresolved pending job acknowledged'); },
