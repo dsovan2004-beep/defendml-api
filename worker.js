@@ -3319,11 +3319,28 @@ const worker = {
 
       let releaseTargetValidated = env.SCAN_RELEASE_HOLD !== "true";
       try {
-        const jobRes = await fetch(`${env.SUPABASE_URL}/rest/v1/red_team_reports?report_id=eq.${encodeURIComponent(jobId)}&select=job_state,job_started_at,target_id&limit=1`, { headers });
-        const jobs = await jobRes.json().catch(() => []);
-        const job = Array.isArray(jobs) ? jobs[0] : null;
+        // A failed/unreadable lookup is UNKNOWN, not proof of a missing job.
+        // Keep it out of the execution catch: no job writes or exhausted-attempt ack.
+        let job;
+        try {
+          const jobRes = await fetch(`${env.SUPABASE_URL}/rest/v1/red_team_reports?report_id=eq.${encodeURIComponent(jobId)}&select=report_id,job_state,job_started_at,target_id&limit=1`, { headers });
+          if (!jobRes.ok) {
+            message.retry({ delaySeconds: 60 });
+            continue;
+          }
+          const jobs = await jobRes.json();
+          if (!Array.isArray(jobs) || jobs.length > 1 || (jobs.length === 1 &&
+              (!jobs[0] || typeof jobs[0] !== "object" || Array.isArray(jobs[0]) || jobs[0].report_id !== jobId))) {
+            message.retry({ delaySeconds: 60 });
+            continue;
+          }
+          job = jobs[0] || null;
+        } catch (_) {
+          message.retry({ delaySeconds: 60 });
+          continue;
+        }
         if (env.SCAN_RELEASE_HOLD === "true") {
-          if (!jobRes.ok || !job || scanReleaseHeld(env, job.target_id)) {
+          if (!job || scanReleaseHeld(env, job.target_id)) {
             message.retry({ delaySeconds: 60 });
             continue;
           }

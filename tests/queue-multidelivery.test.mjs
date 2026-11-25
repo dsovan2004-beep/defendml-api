@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../worker.js';
 
-// Baseline characterization, NOT a fixed-behavior acceptance suite. Real queue
+// Baseline characterization plus named correction acceptance cases. Real queue
 // method; handler/model execution replaced by a counted, fixed Response. Every
 // fetch is intercepted, host/path/method/query checked; no live database or RLS.
 const ORIGIN = 'https://queue-storage.synthetic.invalid';
@@ -15,7 +15,8 @@ const env = { SUPABASE_URL:ORIGIN, SUPABASE_SERVICE_ROLE_KEY:'synthetic-only',
 async function scenario(options, run) {
   let job = {report_id:JOB,job_state:options.state || 'queued',target_id:TARGET,
     job_started_at:options.startedAt || null};
-  let now=NOW, executions=0, terminalWrites=0, targetState='idle';
+  let now=NOW, executions=0, terminalWrites=0, targetState='idle', lookupBodyReads=0;
+  const scenarioEnv={...env,...options.env};
   const requests=[], deliveries=[];
   const oldFetch=globalThis.fetch, oldHandler=worker.fetch, OldDate=Date;
   // Top-level node:test cases are sequential; never enable file concurrency.
@@ -31,12 +32,29 @@ async function scenario(options, run) {
     if (u.pathname==='/rest/v1/red_team_reports') {
       assert.equal(u.searchParams.get('report_id'),`eq.${JOB}`);
       if (method==='GET') {
+        const lookup=Array.isArray(options.lookup)?options.lookup[deliveries.length-1]:options.lookup;
+        if (lookup) {
+          if (lookup==='throw') throw Error('synthetic lookup failure');
+          let response;
+          if (typeof lookup==='number') response=Response.json([structuredClone(job)],{status:lookup});
+          else if(lookup==='reject') response=Response.json({error:'synthetic'},{status:503});
+          else if(lookup==='invalid-json') response=new Response('{');
+          else if(lookup==='non-array') response=Response.json({error:'synthetic'});
+          else if(lookup==='multiple') response=Response.json([job,job]);
+          else if(lookup==='null-row') response=Response.json([null]);
+          else if(lookup==='array-row') response=Response.json([[]]);
+          else if(lookup==='wrong-id') response=Response.json([{...job,report_id:'wrong-job'}]);
+          else if(lookup==='empty') response=Response.json([]);
+          else if(lookup==='terminal') response=Response.json([{...job,job_state:'failed'}]);
+          else throw Error('unknown synthetic mode');
+          const json=response.json.bind(response);
+          response.json=()=>{lookupBodyReads++;return json();};
+          return response;
+        }
         if(terminalWrites && options.reread==='reject') return Response.json({error:'synthetic'},{status:503});
         if(terminalWrites && options.reread==='empty') return Response.json([]);
         if(terminalWrites && options.reread==='non-array') return Response.json({error:'synthetic'});
         if(terminalWrites && options.reread==='completed') job={...job,job_state:'completed'};
-        if(options.lookup==='reject') return Response.json({error:'synthetic'},{status:503});
-        if(options.lookup==='non-array') return Response.json({error:'synthetic'});
         return Response.json([structuredClone(job)]);
       }
       assert.equal(method,'PATCH');
@@ -80,12 +98,13 @@ async function scenario(options, run) {
   const api={
     get job(){return structuredClone(job);}, get executions(){return executions;},
     get terminalWrites(){return terminalWrites;}, requests,deliveries,
+    get lookupBodyReads(){return lookupBodyReads;},
     get targetState(){return targetState;},
     async deliver(attempts,ageMinutes=0){
       now=NOW+ageMinutes*60000;
       const receipt={attempts,ack:0,retry:0,delays:[]}; deliveries.push(receipt);
       await worker.queue({messages:[{body:{jobId:JOB},attempts,
-        ack(){receipt.ack++;},retry(value){receipt.retry++;receipt.delays.push(value.delaySeconds);}}]},env,{});
+        ack(){receipt.ack++;},retry(value){receipt.retry++;receipt.delays.push(value.delaySeconds);}}]},scenarioEnv,{});
       return receipt;
     },
   };
@@ -150,9 +169,9 @@ test('completed success redelivery invokes handler only once',async()=>scenario(
     ['GET','/rest/v1/red_team_reports'],['PATCH','/rest/v1/red_team_reports'],
     ['PATCH','/rest/v1/targets'],['GET','/rest/v1/red_team_reports']]);
 }));
-for(const lookup of ['reject','non-array']) test(`baseline ${lookup} lookup acknowledges queued job without execution`,async()=>scenario({lookup},async s=>{
+for(const lookup of ['reject','non-array']) test(`lookup correction: ${lookup} retries queued job without execution`,async()=>scenario({lookup},async s=>{
   await s.deliver(1); assert.equal(s.executions,0); assert.equal(s.job.job_state,'queued');
-  assert.equal(s.deliveries[0].ack,1); assert.equal(s.requests.length,1);
+  assert.equal(s.deliveries[0].ack,0); assert.deepEqual(s.deliveries[0].delays,[60]); assert.equal(s.requests.length,1);
 }));
 for(const attempts of [1,3]) test(`baseline claim-miss attempt${attempts} retries without terminalizing`,async()=>scenario({claimMiss:true},async s=>{
   await s.deliver(attempts); assert.equal(s.executions,0); assert.equal(s.job.job_state,'queued');
@@ -172,6 +191,37 @@ for(const [status,code] of [[409,'TARGET_INACTIVE'],[429,'WORKER_REJECTED']]) te
 }));
 
 const MARKER='rejected-no-retry';
+for(const lookup of [401,403,404,429,500,503,'throw','invalid-json','non-array','multiple','null-row','array-row','wrong-id']) {
+  for(const attempts of [1,3]) test(`lookup correction: ${lookup} at attempt${attempts} has no side effects`,async()=>scenario({lookup},async s=>{
+    const d=await s.deliver(attempts);
+    assert.deepEqual([d.ack,d.retry,d.delays],[0,1,[60]]);
+    assert.equal(s.executions,0); assert.equal(s.terminalWrites,0);
+    assert.equal(s.job.job_state,'queued'); assert.equal(s.targetState,'idle');
+    assert.equal(s.requests.length,1); assert.equal(s.requests[0].method,'GET');
+    assert.equal(new URLSearchParams(s.requests[0].query).get('select'),'report_id,job_state,job_started_at,target_id');
+    if(typeof lookup==='number') assert.equal(s.lookupBodyReads,0,'HTTP rejection body must remain unread');
+  }));
+}
+for(const lookup of [503,'throw','invalid-json','wrong-id']) test(`lookup correction: ${lookup} then recovered delivery executes exactly once`,async()=>scenario({lookup:[lookup,null],status:200,complete:true},async s=>{
+  await s.deliver(1); assert.equal(s.executions,0); assert.equal(s.requests.length,1);
+  await s.deliver(2); assert.equal(s.executions,1); assert.equal(s.job.job_state,'completed');
+  assert.deepEqual(s.deliveries.map(d=>[d.ack,d.retry]),[[0,1],[1,0]]);
+}));
+test('lookup correction: persistent outage never acknowledges or writes even at attempt3',async()=>scenario({lookup:503},async s=>{
+  for(let i=1;i<=3;i++) await s.deliver(i);
+  assert.equal(s.executions,0); assert.equal(s.requests.length,3);
+  assert.ok(s.requests.every(r=>r.method==='GET'));
+  assert.ok(s.deliveries.every(d=>d.ack===0&&d.retry===1));
+  assert.equal(s.lookupBodyReads,0); assert.equal(s.job.job_state,'queued');
+}));
+for(const lookup of ['empty','terminal']) test(`lookup correction: successful ${lookup} preserves acknowledgment`,async()=>scenario({lookup},async s=>{
+  const d=await s.deliver(3); assert.equal(d.ack,1); assert.equal(d.retry,0);
+  assert.equal(s.executions,0); assert.equal(s.requests.length,1);
+}));
+for(const lookup of ['empty','non-array',503]) test(`lookup correction: held ${lookup} never acknowledges`,async()=>scenario({lookup,env:{SCAN_RELEASE_HOLD:'true',SCAN_RELEASE_QA_TARGETS:TARGET}},async s=>{
+  const d=await s.deliver(3); assert.equal(d.ack,0); assert.deepEqual(d.delays,[60]);
+  assert.equal(s.executions,0); assert.equal(s.requests.length,1);
+}));
 test('correction: marked500 confirms failure and redelivery executes no new handler',async()=>scenario({marker:MARKER},async s=>{
   await s.deliver(1); await s.deliver(2);
   assert.equal(s.executions,1); assert.equal(s.job.job_state,'failed');
